@@ -1,0 +1,97 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env.bak
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+test_results.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+.temp/
+tmp/
+temp/
+*.bak
+
+# Local data and downloads (re-generatable or large)
+invoice_data/
+invoice_ground_truth/
+invoice_dataset_github/
+test_invoices_github/
+test_invoices_ready/
+test_invoices/
+invoice2data_repo/
+# Large dataset files (optional – uncomment if you don’t want to track them)
+# converted_invoice_dataset.xlsx
+# *.xlsx
+# *.pdf
+
+# Misc
+*.sqlite3
+*.db
