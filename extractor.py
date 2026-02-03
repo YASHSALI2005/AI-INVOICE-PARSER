@@ -8,9 +8,18 @@ from pdf2image import convert_from_path, convert_from_bytes
 from PIL import Image
 
 def get_poppler_path():
-    # Use the path we found earlier or rely on PATH
-    # Ideally should be configurable or auto-detected better
-    return r"C:\Users\yashs\AppData\Local\Microsoft\WinGet\Packages\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe\poppler-25.07.0\Library\bin"
+    # 1. Check environment variable
+    env_path = os.environ.get("POPPLER_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+        
+    # 2. Check the hardcoded local Windows path (dev fallback)
+    local_path = r"C:\Users\yashs\AppData\Local\Microsoft\WinGet\Packages\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe\poppler-25.07.0\Library\bin"
+    if os.path.exists(local_path):
+        return local_path
+
+    # 3. Return None to let pdf2image use system PATH (default for hosted/linux)
+    return None
 
 def convert_pdf_to_images(file_input: Union[str, bytes]) -> List[Image.Image]:
     """
