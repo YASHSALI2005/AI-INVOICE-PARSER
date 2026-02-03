@@ -214,7 +214,19 @@ if uploaded_file is not None and api_key:
                     st.error(f"Extraction failed: {data['error']}")
                 else:
                     display_data = data.get("final_data", data) if (use_hybrid and "final_data" in data) else data
-                    
+
+                    # Show invoice validation message if present
+                    validation = display_data.get("validation")
+                    if isinstance(validation, dict):
+                        v_status = validation.get("status")
+                        v_msg = validation.get("message") or ""
+                        if v_status == "valid":
+                            st.success(f"✅ {v_msg or 'Invoice verified successfully.'}")
+                        elif v_status == "failed":
+                            st.error(f"❌ {v_msg or 'Invoice appears invalid or fake. Please review before trusting this data.'}")
+                        elif v_status == "suspicious":
+                            st.warning(f"⚠️ {v_msg or 'Invoice looks suspicious. Please review the flagged issues.'}")
+
                     # Show confidence score
                     if LEARNING_AVAILABLE and st.session_state.confidence:
                         conf = st.session_state.confidence
