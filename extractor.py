@@ -72,13 +72,15 @@ def _normalize_invoice_json(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {"error": "Model returned non-object JSON"}
 
-    # Ensure keys exist
+    # Ensure top-level keys exist
     for key in [
         "invoice_number",
         "date",
         "currency",
         "total_amount",
         "vendor_name",
+        "vendor_address",
+        "vendors_gst_number",
         "line_items",
         "summary",
     ]:
@@ -107,7 +109,18 @@ def _normalize_invoice_json(data: Dict[str, Any]) -> Dict[str, Any]:
         summary = {}
     
     # Ensure summary keys exist
-    for key in ["subtotal", "tax", "credits", "discounts", "charges", "billing_period", "due_date", "account_number", "billing_address"]:
+    for key in [
+        "subtotal",
+        "tax",
+        "credits",
+        "discounts",
+        "charges",
+        "billing_period",
+        "due_date",
+        "account_number",
+        "billing_address",
+        "bill_to_gst_number",  # customer / Bill To GST / tax ID, lives under summary
+    ]:
         summary.setdefault(key, None)
     
     # Coerce numeric fields in summary
@@ -193,9 +206,15 @@ def extract_invoice_data(
                         "- currency (ISO code like USD, EUR)\n"
                         "- total_amount (number)\n"
                         "- vendor_name (string)\n"
-                        "- summary: {subtotal, tax, credits, discounts, charges, billing_period, due_date, account_number, billing_address}\n"
+                        "- vendor_address (string)\n"
+                        "- vendors_gst_number (string, vendor GSTIN/VAT or other vendor tax ID)\n"
+                        "- summary: {subtotal, tax, credits, discounts, charges, billing_period, due_date, account_number, billing_address, bill_to_gst_number}\n"
                         "- line_items: list of {description, quantity, unit_price, total}\n\n"
-                        "If a field cannot be found, set it to null. "
+                        "Look carefully around the vendor name for address blocks labeled 'Address', 'Registered Office', or similar.\n"
+                        "Look carefully for GST/tax labels such as 'GST', 'GSTIN', 'GST No', 'GST Number', 'VAT', or other tax IDs.\n"
+                        "When there are two GST numbers on the invoice, map the one near the vendor block to 'gst_number' and the one near the 'Bill to' block to 'bill_to_gst_number'.\n"
+                        "If a field truly cannot be found anywhere on the invoice, set it to null. "
+                        "If there is a plausible candidate on the page, return your best guess instead of null.\n"
                         "Respond with strictly valid JSON only, no extra text."
                     ),
                 }
@@ -301,6 +320,8 @@ Return a single JSON object with the following exact schema:
   "currency": "string (ISO 4217 code like USD, EUR) or null",
   "total_amount": number or null,
   "vendor_name": "string or null",
+  "vendor_address": "string or null",
+  "vendors_gst_number": "string or null",
   "summary": {
     "subtotal": number or null,
     "tax": number or null,
@@ -310,7 +331,8 @@ Return a single JSON object with the following exact schema:
     "billing_period": "string or null",
     "due_date": "YYYY-MM-DD or null",
     "account_number": "string or null",
-    "billing_address": "string or null"
+    "billing_address": "string or null",
+    "bill_to_gst_number": "string or null"
   },
   "line_items": [
     {
@@ -327,6 +349,11 @@ Instructions:
 - Use the grand total including tax for total_amount if available.
 - If multiple dates exist, use the invoice issue date.
 - Extract all summary information like subtotal, tax, credits, discounts from the invoice.
+- Carefully extract the vendor's full address and any GST/tax identification numbers (e.g., GSTIN, VAT) if present.\n
+- Look near the vendor name for address blocks labeled 'Address', 'Registered Office', or similar.\n
+- Look for GST/tax labels such as 'GST', 'GSTIN', 'GST No', 'GST Number', 'VAT', or other tax IDs.\n
+- When there are two GST numbers on the invoice, map the one associated with the vendor (e.g., near the company name like 'Exafunction, Inc.' or 'From' section) to 'vendors_gst_number', and the one in the 'Bill to' or customer section to summary.bill_to_gst_number (place it inside the summary object, under the billing_address).\n
+- If any address or GST/tax ID appears anywhere on the invoice, do NOT return null for vendor_address, vendors_gst_number, or summary.bill_to_gst_number; instead, return the best-matching value you can find.
 - For billing_period, extract the date range if shown (e.g., "July 1 - July 31, 2014").
 - Respond with strictly valid JSON only, with no markdown and no extra text.
 """.strip()
