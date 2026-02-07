@@ -342,7 +342,7 @@ def extract_invoice_data(
     model_name: str = "gemini-2.0-flash",
 ) -> Optional[Dict[str, Any]]:
     """
-    Sends the image(s) to the selected provider (Gemini or OpenAI) to extract invoice data.
+    Sends the image(s) to the selected provider (Gemini, OpenAI, or Claude) to extract invoice data.
 
     `image` can be a single PIL Image or a list of images (for multi-page PDFs).
     """
@@ -352,9 +352,11 @@ def extract_invoice_data(
     # Clean and validate API key
     api_key = api_key.strip()
     
-    # Basic validation for OpenAI keys
+    # Basic validation for OpenAI/Claude keys
     if provider == "OpenAI" and not api_key.startswith("sk-"):
         return {"error": "Invalid OpenAI API key format. OpenAI keys should start with 'sk-'."}
+    if provider == "Claude" and not api_key.startswith("sk-"):
+        return {"error": "Invalid Claude API key format. Claude keys should start with 'sk-'."}
 
     try:
         # Normalize to list internally for easier handling
@@ -477,7 +479,107 @@ def extract_invoice_data(
                             )
                         }
                 return {"error": f"OpenAI API error: {error_str}"}
+                return {"error": f"OpenAI API error: {error_str}"}
+
+        elif provider == "Claude":
+            import anthropic
+            import base64
             
+            client = anthropic.Anthropic(api_key=api_key)
+
+            def _call_claude_once() -> Dict[str, Any]:
+                content_parts: List[Dict[str, Any]] = []
+
+                # 1️⃣ Images first
+                for img in images:
+                    buffered = io.BytesIO()
+                    img.save(buffered, format="JPEG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    content_parts.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": img_str,
+                            },
+                        }
+                    )
+
+                # 2️⃣ Clear + strict instructions
+                content_parts.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are an expert invoice extraction AI.\\n\\n"
+                            "Extract invoice data into a SINGLE valid JSON object with EXACTLY this schema:\\n\\n"
+                            "{\\n"
+                            '  "invoice_number": string | null,\\n'
+                            '  "date": "YYYY-MM-DD" | null,\\n'
+                            '  "currency": string | null,\\n'
+                            '  "total_amount": number | null,\\n'
+                            '  "vendor_name": string | null,\\n'
+                            '  "vendor_address": string | null,\\n'
+                            '  "vendors_gst_number": string | null,\\n'
+                            '  "summary": {\\n'
+                            '    "subtotal": number | null,\\n'
+                            '    "tax": number | null,\\n'
+                            '    "credits": number | null,\\n'
+                            '    "discounts": number | null,\\n'
+                            '    "charges": number | null,\\n'
+                            '    "billing_period": string | null,\\n'
+                            '    "due_date": "YYYY-MM-DD" | null,\\n'
+                            '    "account_number": string | null,\\n'
+                            '    "billing_address": string | null,\\n'
+                            '    "bill_to_gst_number": string | null\\n'
+                            '  },\\n'
+                            '  "line_items": [\\n'
+                            '    { "description": string | null, "quantity": number | null, "unit_price": number | null, "total": number | null }\\n'
+                            '  ]\\n'
+                            "}\\n\\n"
+                            "Rules:\\n"
+                            "- Do NOT guess values.\\n"
+                            "- If unreadable or missing, use null.\\n"
+                            "- Copy numbers exactly as shown.\\n"
+                            "- One row in the invoice table = one line_item.\\n"
+                            "- Respond with ONLY valid JSON. No markdown. No explanation."
+                        ),
+                    }
+                )
+
+                response = client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=4096,
+                    temperature=0,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": content_parts,
+                        }
+                    ],
+                )
+
+                raw = response.content[0].text
+
+                if "```json" in raw:
+                    raw = raw.split("```json")[1].split("```")[0].strip()
+                elif "```" in raw:
+                    raw = raw.split("```")[1].split("```")[0].strip()
+
+                data = json.loads(raw)
+                normalized = _normalize_invoice_json(data)
+                normalized["validation"] = validate_invoice(normalized)
+                return normalized
+
+            try:
+
+                last_result: Dict[str, Any] = {}
+                for attempt in range(2):
+                    last_result = _call_claude_once()
+                    if _is_reasonable_invoice(last_result) or attempt == 1:
+                        return last_result
+            except Exception as e:
+                return {"error": f"Claude API error: {str(e)}"}
         else:
             # Default to Gemini
             genai.configure(api_key=api_key)

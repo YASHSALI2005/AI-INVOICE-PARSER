@@ -72,15 +72,19 @@ colored_header(
 # Provider selection
 col_provider, col_status, col_stats = st.columns([1, 2, 1])
 with col_provider:
-    provider = st.selectbox("AI Provider", ["Gemini", "OpenAI"], index=0, label_visibility="collapsed")
+    provider = st.selectbox("AI Provider", ["Gemini", "OpenAI", "Claude"], index=0, label_visibility="collapsed")
 
 # Get API key
 if provider == "Gemini":
     api_key_env = os.getenv("GEMINI_API_KEY")
     model_name = "gemini-2.5-flash"
-else:
+elif provider == "OpenAI":
     api_key_env = os.getenv("OPENAI_API_KEY")
     model_name = "gpt-4o-mini"
+else: # Claude
+    api_key_env = os.getenv("CLAUDE_API_KEY")
+    # model_name = "claude-3-5-sonnet-20240620"
+    model_name = "claude-3-haiku-20240307"
 
 api_key = api_key_env
 with col_status:
@@ -89,8 +93,10 @@ with col_status:
         if not api_key:
             if provider == "Gemini":
                 st.caption("⚠️ [Get Gemini Key](https://aistudio.google.com/app/apikey)")
-            else:
+            elif provider == "OpenAI":
                 st.caption("⚠️ [Get OpenAI Key](https://platform.openai.com/api-keys)")
+            else:
+                st.caption("⚠️ [Get Claude Key](https://console.anthropic.com/)")
     else:
         st.caption(f"✅ {provider} ready")
 

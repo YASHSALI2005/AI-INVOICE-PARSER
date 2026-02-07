@@ -149,7 +149,11 @@ def _call_llm_for_validation(
     import google.generativeai as genai
     import io
     import base64
+    import google.generativeai as genai
+    import io
+    import base64
     from openai import OpenAI
+    import anthropic
 
     # Normalize to list
     images: List[Image.Image]
@@ -178,6 +182,39 @@ def _call_llm_for_validation(
                 response_format={"type": "json_object"}
             )
             return json.loads(response.choices[0].message.content)
+
+        elif provider == "Claude":
+            client = anthropic.Anthropic(api_key=api_key.strip())
+            content_parts = []
+            
+            for img in images:
+                buffered = io.BytesIO()
+                img.save(buffered, format="JPEG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
+                content_parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": img_str
+                    }
+                })
+            
+            content_parts.append({"type": "text", "text": prompt})
+            
+            response = client.messages.create(
+                model=model_name or "claude-3-haiku-20240307",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": content_parts}]
+            )
+            
+            raw = response.content[0].text
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+                
+            return json.loads(raw)
 
         else:  # Gemini
             genai.configure(api_key=api_key.strip())

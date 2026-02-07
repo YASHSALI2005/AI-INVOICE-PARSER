@@ -5,6 +5,7 @@ pdf2image
 pandas
 Pillow
 openai
+anthropic
 openpyxl
 # For hybrid mode (template + LLM):
 # Install invoice2data from the local repo: pip install -e invoice2data_repo

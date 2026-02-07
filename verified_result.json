@@ -1,0 +1,121 @@
+{
+  "status": "success",
+  "initial_extraction": {
+    "invoice_number": "FA02/2015/020059",
+    "date": "2015-02-02",
+    "currency": null,
+    "total_amount": 82003.3,
+    "vendor_name": "Marc Demo",
+    "vendor_address": "3575 Buena Vista Avenue, Eugene COR 97401, \u00c9tats Unis",
+    "vendors_gst_number": null,
+    "summary": {
+      "subtotal": 75974.0,
+      "tax": 6029.3,
+      "credits": null,
+      "discounts": null,
+      "charges": null,
+      "billing_period": null,
+      "due_date": null,
+      "account_number": null,
+      "billing_address": null,
+      "bill_to_gst_number": null
+    },
+    "line_items": [
+      {
+        "description": "Service Client (Heures Pr\u00e9pay\u00e9es)",
+        "quantity": 64.0,
+        "unit_price": 190.0,
+        "total": 12160.0
+      },
+      {
+        "description": "Flipover",
+        "quantity": 35.0,
+        "unit_price": 1700.0,
+        "total": 59500.0
+      },
+      {
+        "description": "Combinaison de bureau",
+        "quantity": 7.0,
+        "unit_price": 300.0,
+        "total": 2100.0
+      },
+      {
+        "description": "Bo\u00eete de rangement",
+        "quantity": 41.0,
+        "unit_price": 14.0,
+        "total": 574.0
+      },
+      {
+        "description": "Tiroir noir",
+        "quantity": 82.0,
+        "unit_price": 20.0,
+        "total": 1640.0
+      }
+    ],
+    "validation": {
+      "status": "suspicious",
+      "issues": [
+        "Missing or empty required field: currency."
+      ],
+      "message": "Invoice looks suspicious. Please review the flagged issues."
+    }
+  },
+  "final_verified_extraction": {
+    "invoice_number": "FA02/2015/020059",
+    "date": "2015-02-02",
+    "currency": "EUR",
+    "total_amount": 82003.3,
+    "vendor_name": "Marc Demo",
+    "vendor_address": "3575 Buena Vista Avenue, Eugene COR 97401, \u00c9tats Unis",
+    "vendors_gst_number": null,
+    "summary": {
+      "subtotal": 75974.0,
+      "tax": 6029.3,
+      "credits": null,
+      "discounts": null,
+      "charges": null,
+      "billing_period": null,
+      "due_date": null,
+      "account_number": null,
+      "billing_address": null,
+      "bill_to_gst_number": null
+    },
+    "line_items": [
+      {
+        "description": "Service Client (Heures Pr\u00e9pay\u00e9es)",
+        "quantity": 64.0,
+        "unit_price": 190.0,
+        "total": 12160.0
+      },
+      {
+        "description": "Flipover",
+        "quantity": 35.0,
+        "unit_price": 1700.0,
+        "total": 59500.0
+      },
+      {
+        "description": "Combinaison de bureau",
+        "quantity": 7.0,
+        "unit_price": 300.0,
+        "total": 2100.0
+      },
+      {
+        "description": "Bo\u00eete de rangement",
+        "quantity": 41.0,
+        "unit_price": 14.0,
+        "total": 574.0
+      },
+      {
+        "description": "Tiroir noir",
+        "quantity": 82.0,
+        "unit_price": 20.0,
+        "total": 1640.0
+      }
+    ],
+    "validation": {
+      "status": "valid",
+      "issues": [],
+      "message": "Invoice is valid."
+    }
+  }
+}
