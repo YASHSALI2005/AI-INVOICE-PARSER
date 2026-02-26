@@ -196,19 +196,6 @@ def _is_reasonable_invoice(data: Dict[str, Any], document_type: str = "Sales Inv
     return 0.5 <= ratio <= 1.5
 
 
-def validate_invoice(data: Dict[str, Any], document_type: str = "Sales Invoice bill") -> Dict[str, Any]:
-    issues: List[str] = []
-    if not isinstance(data, dict):
-        return {"status": "failed", "issues": ["Not an object."], "message": "Fake or invalid."}
-        
-    has_list = any(isinstance(data.get(k), list) and len(data.get(k)) > 0 for k in ["line_items", "charges", "order_items"])
-    if not has_list:
-        issues.append("No line items / charges detected.")
-
-    status = "failed" if "No line items / charges detected." in issues else "valid"
-    message = "Verified." if status == "valid" else "Please review."
-    return {"status": status, "issues": issues, "message": message}
-
 def extract_invoice_data(
     image: Union[Image.Image, List[Image.Image]],
     api_key: str,
@@ -289,7 +276,6 @@ def extract_invoice_data(
                     # Some SDK variants already return a dict
                     data = raw  # type: ignore[assignment]
                 normalized = _normalize_invoice_json(data, document_type)
-                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             try:
@@ -391,7 +377,6 @@ def extract_invoice_data(
 
                 data = json.loads(raw)
                 normalized = _normalize_invoice_json(data, document_type)
-                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             try:
@@ -439,7 +424,6 @@ def extract_invoice_data(
                 data = json.loads(text)
 
                 normalized = _normalize_invoice_json(data, document_type)
-                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             # Single retry with simple validation to reduce inconsistent parses
