@@ -191,34 +191,44 @@ def check_amount_consistency(extracted_data: Dict[str, Any]) -> Tuple[bool, floa
     Check if amounts are consistent (line items sum up to total, etc.).
     Returns (is_consistent, confidence, message).
     """
-    total_amount = extracted_data.get("total_amount")
+    total_amount = extracted_data.get("total_amount") or extracted_data.get("total_amount_due") or extracted_data.get("order_total") or extracted_data.get("summary", {}).get("total_commitment")
     summary = extracted_data.get("summary", {})
-    line_items = extracted_data.get("line_items", [])
+    line_items = extracted_data.get("line_items") or extracted_data.get("charges") or extracted_data.get("order_items") or []
     
     issues = []
     
     # Check if line items sum up to subtotal or total
     if line_items and total_amount:
         line_total = sum(
-            item.get("total", 0) or 0 
+            item.get("total") or item.get("amount") or (item.get("qty", 0) * item.get("unit_price", 0)) or 0 
             for item in line_items 
             if isinstance(item, dict)
         )
         
-        subtotal = summary.get("subtotal") or total_amount
+        subtotal = summary.get("subtotal") or summary.get("total_usage_sale_charges") or summary.get("order_subtotal") or total_amount
         
         if line_total > 0:
             diff = abs(line_total - subtotal)
             if diff > 0.01:
                 # Allow for tax difference
-                tax = summary.get("tax", 0) or 0
+                tax = summary.get("tax") or summary.get("tax_percentage") or summary.get("tax_amount")
+                if tax is None:
+                    # Sum up line-level tax if present
+                    tax = sum(item.get("tax_amount", 0) or 0 for item in line_items if isinstance(item, dict))
+                
+                tax = tax or 0
                 if abs(line_total + tax - total_amount) > 0.01:
                     issues.append(f"Line items ({line_total}) don't match total ({total_amount})")
     
     # Check subtotal + tax = total
-    if summary.get("subtotal") and summary.get("tax") and total_amount:
-        expected_total = (summary.get("subtotal") or 0) + (summary.get("tax") or 0)
-        if abs(expected_total - total_amount) > 0.01:
+    sub_val = summary.get("subtotal") or summary.get("order_subtotal") or summary.get("total_usage_sale_charges")
+    tax_val = summary.get("tax") or summary.get("tax_percentage") or summary.get("tax_amount")
+    if tax_val is None:
+        tax_val = sum(item.get("tax_amount", 0) or 0 for item in line_items if isinstance(item, dict))
+    
+    if sub_val and tax_val and total_amount:
+        expected_total = float(sub_val) + float(tax_val)
+        if abs(expected_total - float(total_amount)) > 0.01:
             issues.append(f"Subtotal + Tax ({expected_total}) != Total ({total_amount})")
     
     if issues:
@@ -251,15 +261,17 @@ def calculate_confidence(extracted_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # Validate each field
     # Invoice number (weight: 1.0)
-    valid, score = validate_invoice_number(extracted_data.get("invoice_number"))
+    doc_number = extracted_data.get("invoice_number") or extracted_data.get("po_number") or extracted_data.get("order_number")
+    valid, score = validate_invoice_number(doc_number)
     result["fields"]["invoice_number"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(1.0)
     if score < 0.7:
-        result["flags"].append("Invoice number may be incorrect")
+        result["flags"].append("Document number may be incorrect")
     
     # Date (weight: 1.0)
-    valid, score = validate_date_format(extracted_data.get("date"))
+    doc_date = extracted_data.get("date") or extracted_data.get("date_of_issue") or extracted_data.get("order_date")
+    valid, score = validate_date_format(doc_date)
     result["fields"]["date"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(1.0)
@@ -267,7 +279,16 @@ def calculate_confidence(extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         result["flags"].append("Date format may be incorrect")
     
     # Amount (weight: 1.5 - most important)
-    valid, score = validate_amount(extracted_data.get("total_amount"))
+    # Map all possible variations
+    doc_total = extracted_data.get("total_amount")
+    if doc_total is None:
+        doc_total = extracted_data.get("summary", {}).get("total_amount_due")
+    if doc_total is None:
+        doc_total = extracted_data.get("order_total")
+    if doc_total is None:
+        doc_total = extracted_data.get("summary", {}).get("total_commitment")
+        
+    valid, score = validate_amount(doc_total)
     result["fields"]["total_amount"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(1.5)
@@ -275,23 +296,25 @@ def calculate_confidence(extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         result["flags"].append("Total amount may be incorrect")
     
     # Currency (weight: 0.5)
-    valid, score = validate_currency(extracted_data.get("currency"))
+    valid, score = validate_currency(extracted_data.get("currency", "USD")) # default to valid if missing in schema
     result["fields"]["currency"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(0.5)
-    if score < 0.7:
+    if score < 0.7 and extracted_data.get("currency"):
         result["flags"].append("Currency may be incorrect")
     
     # Vendor name (weight: 1.0)
-    valid, score = validate_vendor_name(extracted_data.get("vendor_name"))
+    doc_vendor = extracted_data.get("vendor_name") or extracted_data.get("from") or extracted_data.get("seller")
+    valid, score = validate_vendor_name(doc_vendor)
     result["fields"]["vendor_name"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(1.0)
     if score < 0.7:
-        result["flags"].append("Vendor name may be incorrect")
+        result["flags"].append("Vendor/Provider name may be incorrect")
     
     # Line items (weight: 0.8)
-    valid, score = validate_line_items(extracted_data.get("line_items", []))
+    lines = extracted_data.get("line_items") or extracted_data.get("charges") or extracted_data.get("order_items") or []
+    valid, score = validate_line_items(lines)
     result["fields"]["line_items"] = {"score": score, "valid": valid}
     scores.append(score)
     weights.append(0.8)

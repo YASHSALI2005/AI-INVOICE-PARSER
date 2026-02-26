@@ -325,6 +325,7 @@ def hybrid_extract_invoice(
     provider: str = "Gemini",
     model_name: str = "gemini-2.0-flash",
     template_dir: Optional[str] = None,
+    document_type: str = "Sales Invoice bill",
 ) -> Dict[str, Any]:
     """
     Hybrid extraction: Try templates first, then use LLM for validation and additional fields.
@@ -355,7 +356,7 @@ def hybrid_extract_invoice(
         result["template_matched"] = False
         # No template match, use LLM for full extraction
         llm_result = extractor.extract_invoice_data(
-            image, api_key, provider=provider, model_name=model_name
+            image, api_key, provider=provider, model_name=model_name, document_type=document_type
         )
         if "error" not in llm_result:
             result["final_data"] = llm_result

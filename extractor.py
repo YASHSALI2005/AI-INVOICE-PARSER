@@ -49,119 +49,109 @@ def list_gemini_models(api_key: str) -> List[str]:
         models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                # Filter for likely useful models to avoid clutter
                 if "gemini" in m.name.lower():
                     models.append(m.name)
         return sorted(models, reverse=True) # Newest first heuristic
     except Exception as e:
         print(f"Error listing models: {e}")
-        # Fallback to a couple of reasonable defaults
         return ["models/gemini-2.0-flash", "models/gemini-1.5-flash"]
 
 
-def _normalize_invoice_json(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize and lightly validate the raw JSON coming back from the model.
+def _get_prompt_for_type(document_type: str, provider: str) -> str:
+    if document_type == "Purchase Order bill":
+        schema = '''{
+  "from": "string or null",
+  "to": "string or null",
+  "po_number": "string or null",
+  "date_of_issue": "YYYY-MM-DD or null",
+  "delivery_expected_by": "YYYY-MM-DD or null",
+  "summary": { "total_commitment": 0.0 },
+  "line_items": [ { "item_description": "string or null", "quantity": 0.0, "unit_price": 0.0, "tax_amount": 0.0, "total": 0.0 } ]
+}'''
+        rules = """- One row in the main table = one line_item.
+- IMPORTANT: Extract 'tax_amount' ONLY if it is literally printed on that specific line. Do NOT calculate it yourself."""
+    elif document_type == "Sales Order bill":
+        schema = '''{
+  "seller": "string or null",
+  "buyer": "string or null",
+  "order_number": "string or null",
+  "order_date": "YYYY-MM-DD or null",
+  "status": "string or null (Confirmed or Pending Fulfillment)",
+  "summary": { "order_subtotal": 0.0, "estimated_shipping": 0.0,"tax_amount": 0.0, "order_total": 0.0 },
+  "order_items": [ { "product_code": "string or null", "description": "string or null", "qty": 0.0, "unit_price": 0.0 } ]
+}'''
+        rules = """- One row in the main table = one order_item.
+- IMPORTANT: Extract 'tax_amount' from the summary section matching the document total tax. Do NOT calculate it yourself."""
+    else: # Sales Invoice bill
+        schema = '''{
+  "from": "string or null",
+  "bill_to": "string or null",
+  "invoice_number": "string or null",
+  "date_of_issue": "YYYY-MM-DD or null",
+  "payment_due_date": "YYYY-MM-DD or null",
+  "summary": { "total_usage_sale_charges": 0.0, "tax_percentage": 0.0, "total_amount_due": 0.0 },
+  "charges": [ { "description": "string or null", "quantity_hours": 0.0, "rate": 0.0, "amount": 0.0 } ]
+}'''
+        rules = "- One row in the main billable services table = one charge item."
 
-    - Ensure required keys exist
-    - Normalize currency casing
-    - Coerce numeric fields where reasonable
-    - Ensure line_items is a list of dicts
-    - Ensure summary is a dict with expected keys
-    """
+    if provider in ["Claude", "OpenAI"]:
+        return f"Extract {document_type} data into a SINGLE JSON object with EXACTLY this schema:\n{schema}\n\nRules:\n- Do NOT guess values. If unreadable or missing, use null.\n- Copy numbers exactly as shown.\n{rules}\n- Respond with ONLY valid JSON. No markdown. No explanation."
+    else: # Gemini
+        return f"You are an expert extraction AI.\n\nGoal:\nReturn a single JSON object for a {document_type} with the following exact schema:\n{schema}\n\nInstructions:\n- If you cannot confidently find a field, set it to null instead of guessing.\n- If multiple dates exist, use the issue date.\n- Extract all summary information from the document.\n{rules}\n- Respond with strictly valid JSON only, with no markdown and no extra text."
+
+
+def _normalize_invoice_json(data: Dict[str, Any], document_type: str = "Sales Invoice bill") -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {"error": "Model returned non-object JSON"}
 
-    # Ensure top-level keys exist
-    for key in [
-        "invoice_number",
-        "date",
-        "currency",
-        "total_amount",
-        "vendor_name",
-        "vendor_address",
-        "vendors_gst_number",
-        "line_items",
-        "summary",
-    ]:
-        if key == "line_items":
-            data.setdefault(key, [])
-        elif key == "summary":
-            data.setdefault(key, {})
-        else:
-            data.setdefault(key, None)
-
-    # Normalize currency (ISO-like upper-case)
-    if isinstance(data.get("currency"), str):
-        data["currency"] = data["currency"].strip().upper()
-
-    # Coerce total_amount to float when possible
-    total_amount = data.get("total_amount")
-    if isinstance(total_amount, str):
-        try:
-            data["total_amount"] = float(total_amount.replace(",", "").strip())
-        except ValueError:
-            pass
-
-    # Normalize summary section
-    summary = data.get("summary") or {}
-    if not isinstance(summary, dict):
-        summary = {}
-    
-    # Ensure summary keys exist
-    for key in [
-        "subtotal",
-        "tax",
-        "credits",
-        "discounts",
-        "charges",
-        "billing_period",
-        "due_date",
-        "account_number",
-        "billing_address",
-        "bill_to_gst_number",  # customer / Bill To GST / tax ID, lives under summary
-    ]:
-        summary.setdefault(key, None)
-    
-    # Coerce numeric fields in summary
-    for num_key in ["subtotal", "tax", "credits", "discounts", "charges"]:
-        val = summary.get(num_key)
-        if isinstance(val, str):
-            try:
-                summary[num_key] = float(val.replace(",", "").replace("$", "").strip())
-            except ValueError:
-                pass
-    
-    data["summary"] = summary
-
-    # Ensure line_items is a list of dicts
-    line_items = data.get("line_items") or []
-    if not isinstance(line_items, list):
-        line_items = [line_items]
-    normalized_items: List[Dict[str, Any]] = []
-    for item in line_items:
-        if not isinstance(item, dict):
-            continue
-        # Standardize keys
-        for k in ["description", "quantity", "unit_price", "total"]:
-            item.setdefault(k, None)
-
-        # Numeric coercion for quantity/unit_price/total
-        for num_key in ["quantity", "unit_price", "total"]:
-            val = item.get(num_key)
-            if isinstance(val, str):
+    def _coerce_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+        for k, v in list(d.items()):
+            if isinstance(v, str):
                 try:
-                    item[num_key] = float(val.replace(",", "").strip())
+                    cval = v.replace(",", "").replace(" ", "").replace("$", "").replace("€", "").replace("£", "")
+                    if cval and (cval[0].isdigit() or (cval.startswith("-") and cval[1:].isdigit())):
+                        # If it just contains digits and maybe a dot
+                        if cval.replace(".", "", 1).isdigit() or cval.replace("-", "", 1).replace(".", "", 1).isdigit():
+                            d[k] = float(cval)
+                        else:
+                            # If it's something like "0.00 (calculated)" or has noise
+                            # Keep it as string if it doesn't look like a simple number
+                            pass
                 except ValueError:
-                    continue
-        normalized_items.append(item)
+                    pass
+            elif isinstance(v, dict):
+                d[k] = _coerce_dict(v)
+            elif isinstance(v, list):
+                new_list = []
+                for item in v:
+                    if isinstance(item, dict):
+                        new_list.append(_coerce_dict(item))
+                    else:
+                        new_list.append(item)
+                d[k] = new_list
+        return d
+        
+    data = _coerce_dict(data)
 
-    data["line_items"] = normalized_items
+    if "summary" not in data or not isinstance(data["summary"], dict):
+        data["summary"] = {}
+
+    list_keys = ["line_items", "charges", "order_items"]
+    for lk in list_keys:
+        if lk in data and not isinstance(data[lk], list):
+            data[lk] = [data[lk]]
 
     return data
 
 
-def _is_reasonable_invoice(data: Dict[str, Any]) -> bool:
+def _is_reasonable_invoice(data: Dict[str, Any], document_type: str = "Sales Invoice bill") -> bool:
+    if not isinstance(data, dict):
+        return False
+    # Check if there's any list with items
+    has_list = any(isinstance(data.get(k), list) and len(data.get(k)) > 0 for k in ["line_items", "charges", "order_items"])
+    if not has_list:
+        return False
+    return True
     """
     Lightweight validation to detect obviously bad parses so we can retry once.
 
@@ -206,133 +196,17 @@ def _is_reasonable_invoice(data: Dict[str, Any]) -> bool:
     return 0.5 <= ratio <= 1.5
 
 
-def validate_invoice(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Run a set of validation checks on a normalized invoice JSON.
-
-    Returns:
-        {
-          "status": "valid" | "suspicious" | "failed",
-          "issues": [ "text description of problem", ... ]
-        }
-    """
+def validate_invoice(data: Dict[str, Any], document_type: str = "Sales Invoice bill") -> Dict[str, Any]:
     issues: List[str] = []
-
     if not isinstance(data, dict):
-        return {
-            "status": "failed",
-            "issues": ["Invoice data is not an object."],
-            "message": "Invoice appears invalid. Please treat it as fake until manually reviewed.",
-        }
+        return {"status": "failed", "issues": ["Not an object."], "message": "Fake or invalid."}
+        
+    has_list = any(isinstance(data.get(k), list) and len(data.get(k)) > 0 for k in ["line_items", "charges", "order_items"])
+    if not has_list:
+        issues.append("No line items / charges detected.")
 
-    summary = data.get("summary") or {}
-    line_items = data.get("line_items") or []
-
-    # 1) Required top-level fields present
-    for field in ["invoice_number", "date", "currency", "total_amount", "vendor_name"]:
-        if not data.get(field):
-            issues.append(f"Missing or empty required field: {field}.")
-
-    # 2) Summary + line items presence
-    if not isinstance(summary, dict):
-        issues.append("Summary section is missing or not an object.")
-    if not isinstance(line_items, list) or len(line_items) == 0:
-        issues.append("No line items detected.")
-
-    # 3) Basic type / format checks
-    total_amount = data.get("total_amount")
-    if total_amount is not None and not isinstance(total_amount, (int, float)):
-        issues.append("Total amount is not numeric.")
-
-    from datetime import datetime
-
-    def _check_date(name: str, value: Any) -> None:
-        if value in (None, "", "null"):
-            return
-        if not isinstance(value, str):
-            issues.append(f"{name} is not a string date.")
-            return
-        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
-            try:
-                datetime.strptime(value, fmt)
-                return
-            except Exception:
-                continue
-        issues.append(f"{name} is not a valid date: {value!r}.")
-
-    _check_date("date", data.get("date"))
-    _check_date("due_date", summary.get("due_date") if isinstance(summary, dict) else None)
-
-    currency = data.get("currency")
-    if currency and (not isinstance(currency, str) or len(currency.strip()) != 3):
-        issues.append(f"Currency should be a 3-letter code (e.g., USD, EUR), got {currency!r}.")
-
-    # 4) Amount consistency (line items vs subtotal vs total)
-    subtotal = summary.get("subtotal") if isinstance(summary, dict) else None
-    if isinstance(subtotal, (int, float)) and isinstance(line_items, list) and line_items:
-        total_from_items = 0.0
-        for item in line_items:
-            if not isinstance(item, dict):
-                continue
-            t = item.get("total")
-            if isinstance(t, (int, float)):
-                total_from_items += float(t)
-
-        if subtotal > 0 and total_from_items > 0:
-            ratio = total_from_items / float(subtotal)
-            if not (0.9 <= ratio <= 1.1):
-                issues.append(
-                    f"Line item totals ({total_from_items}) differ significantly from subtotal ({subtotal})."
-                )
-
-    if isinstance(subtotal, (int, float)) and isinstance(total_amount, (int, float)):
-        tax = summary.get("tax") if isinstance(summary, dict) else None
-        charges = summary.get("charges") if isinstance(summary, dict) else None
-        discounts = summary.get("discounts") if isinstance(summary, dict) else None
-        credits = summary.get("credits") if isinstance(summary, dict) else None
-
-        def _val(x: Any) -> float:
-            return float(x) if isinstance(x, (int, float)) else 0.0
-
-        expected_total = subtotal + _val(tax) + _val(charges) - _val(discounts) - _val(credits)
-        if expected_total > 0:
-            ratio = float(total_amount) / expected_total
-            if not (0.9 <= ratio <= 1.1):
-                issues.append(
-                    f"Total amount ({total_amount}) is inconsistent with subtotal/tax/discounts ({expected_total})."
-                )
-
-    # 5) Simple sanity checks on line items
-    if isinstance(line_items, list):
-        for idx, item in enumerate(line_items):
-            if not isinstance(item, dict):
-                issues.append(f"Line item {idx} is not an object.")
-                continue
-            if not item.get("description"):
-                issues.append(f"Line item {idx} has no description.")
-            qty = item.get("quantity")
-            if isinstance(qty, (int, float)) and qty < 0:
-                issues.append(f"Line item {idx} has negative quantity ({qty}).")
-
-    # Decide status based on number/severity of issues
-    if not issues:
-        status = "valid"
-        message = "Invoice verified successfully."
-    else:
-        # For now treat any issue as suspicious; callers can decide how strict to be
-        # If there are clearly critical issues (no line items, no totals), mark failed.
-        critical = any(
-            "No line items detected" in msg
-            or "Total amount is not numeric" in msg
-            or "Summary section is missing" in msg
-            for msg in issues
-        )
-        status = "failed" if critical else "suspicious"
-        if status == "failed":
-            message = "Invoice appears invalid or fake. Please review before trusting this data."
-        else:
-            message = "Invoice looks suspicious. Please review the flagged issues."
-
+    status = "failed" if "No line items / charges detected." in issues else "valid"
+    message = "Verified." if status == "valid" else "Please review."
     return {"status": status, "issues": issues, "message": message}
 
 def extract_invoice_data(
@@ -340,6 +214,7 @@ def extract_invoice_data(
     api_key: str,
     provider: str = "Gemini",
     model_name: str = "gemini-2.0-flash",
+    document_type: str = "Sales Invoice bill",
 ) -> Optional[Dict[str, Any]]:
     """
     Sends the image(s) to the selected provider (Gemini, OpenAI, or Claude) to extract invoice data.
@@ -372,26 +247,7 @@ def extract_invoice_data(
             
             client = OpenAI(api_key=api_key)
 
-            base_text_instructions = (
-                "Extract invoice data into JSON with these fields:\n"
-                "- invoice_number (string)\n"
-                "- date (YYYY-MM-DD)\n"
-                "- currency (ISO code like USD, EUR)\n"
-                "- total_amount (number)\n"
-                "- vendor_name (string)\n"
-                "- vendor_address (string)\n"
-                "- vendors_gst_number (string, vendor GSTIN/VAT or other vendor tax ID)\n"
-                "- summary: {subtotal, tax, credits, discounts, charges, billing_period, due_date, account_number, billing_address, bill_to_gst_number}\n"
-                "- line_items: list of {description, quantity, unit_price, total}\n\n"
-                "For line_items, treat each visible row in the main charges/usage table as exactly one line item.\n"
-                "Do NOT merge, split, invent, or drop rows. Copy numbers exactly; if any value is unreadable, set it to null instead of guessing.\n"
-                "Look carefully around the vendor name for address blocks labeled 'Address', 'Registered Office', or similar.\n"
-                "Look carefully for GST/tax labels such as 'GST', 'GSTIN', 'GST No', 'GST Number', 'VAT', or other tax IDs.\n"
-                "When there are two GST numbers on the invoice, map the one near the vendor block to 'vendors_gst_number' and the one near the 'Bill to' block to 'bill_to_gst_number'.\n"
-                "If a field truly cannot be found anywhere on the invoice, set it to null. "
-                "If there is a plausible candidate on the page, return your best guess instead of null.\n"
-                "Respond with strictly valid JSON only, no extra text."
-            )
+            base_text_instructions = _get_prompt_for_type(document_type, "OpenAI")
 
             # OpenAI expects base64 images; support multiple pages
             def _call_openai_once() -> Dict[str, Any]:
@@ -432,8 +288,8 @@ def extract_invoice_data(
                 except Exception:
                     # Some SDK variants already return a dict
                     data = raw  # type: ignore[assignment]
-                normalized = _normalize_invoice_json(data)
-                normalized["validation"] = validate_invoice(normalized)
+                normalized = _normalize_invoice_json(data, document_type)
+                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             try:
@@ -441,7 +297,7 @@ def extract_invoice_data(
                 last_result: Dict[str, Any] = {}
                 for attempt in range(2):
                     last_result = _call_openai_once()
-                    if _is_reasonable_invoice(last_result) or attempt == 1:
+                    if _is_reasonable_invoice(last_result, document_type) or attempt == 1:
                         return last_result
             except Exception as openai_error:
                 # Provide more helpful error messages
@@ -510,40 +366,7 @@ def extract_invoice_data(
                 content_parts.append(
                     {
                         "type": "text",
-                        "text": (
-                            "You are an expert invoice extraction AI.\\n\\n"
-                            "Extract invoice data into a SINGLE valid JSON object with EXACTLY this schema:\\n\\n"
-                            "{\\n"
-                            '  "invoice_number": string | null,\\n'
-                            '  "date": "YYYY-MM-DD" | null,\\n'
-                            '  "currency": string | null,\\n'
-                            '  "total_amount": number | null,\\n'
-                            '  "vendor_name": string | null,\\n'
-                            '  "vendor_address": string | null,\\n'
-                            '  "vendors_gst_number": string | null,\\n'
-                            '  "summary": {\\n'
-                            '    "subtotal": number | null,\\n'
-                            '    "tax": number | null,\\n'
-                            '    "credits": number | null,\\n'
-                            '    "discounts": number | null,\\n'
-                            '    "charges": number | null,\\n'
-                            '    "billing_period": string | null,\\n'
-                            '    "due_date": "YYYY-MM-DD" | null,\\n'
-                            '    "account_number": string | null,\\n'
-                            '    "billing_address": string | null,\\n'
-                            '    "bill_to_gst_number": string | null\\n'
-                            '  },\\n'
-                            '  "line_items": [\\n'
-                            '    { "description": string | null, "quantity": number | null, "unit_price": number | null, "total": number | null }\\n'
-                            '  ]\\n'
-                            "}\\n\\n"
-                            "Rules:\\n"
-                            "- Do NOT guess values.\\n"
-                            "- If unreadable or missing, use null.\\n"
-                            "- Copy numbers exactly as shown.\\n"
-                            "- One row in the invoice table = one line_item.\\n"
-                            "- Respond with ONLY valid JSON. No markdown. No explanation."
-                        ),
+                        "text": _get_prompt_for_type(document_type, "Claude")
                     }
                 )
 
@@ -567,8 +390,8 @@ def extract_invoice_data(
                     raw = raw.split("```")[1].split("```")[0].strip()
 
                 data = json.loads(raw)
-                normalized = _normalize_invoice_json(data)
-                normalized["validation"] = validate_invoice(normalized)
+                normalized = _normalize_invoice_json(data, document_type)
+                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             try:
@@ -576,7 +399,7 @@ def extract_invoice_data(
                 last_result: Dict[str, Any] = {}
                 for attempt in range(2):
                     last_result = _call_claude_once()
-                    if _is_reasonable_invoice(last_result) or attempt == 1:
+                    if _is_reasonable_invoice(last_result, document_type) or attempt == 1:
                         return last_result
             except Exception as e:
                 return {"error": f"Claude API error: {str(e)}"}
@@ -602,54 +425,7 @@ def extract_invoice_data(
                     },
                 )
 
-            prompt = """
-You are an expert invoice extraction AI.
-
-Goal:
-Return a single JSON object with the following exact schema:
-{
-  "invoice_number": "string or null",
-  "date": "YYYY-MM-DD or null",
-  "currency": "string (ISO 4217 code like USD, EUR) or null",
-  "total_amount": number or null,
-  "vendor_name": "string or null",
-  "vendor_address": "string or null",
-  "vendors_gst_number": "string or null",
-  "summary": {
-    "subtotal": number or null,
-    "tax": number or null,
-    "credits": number or null,
-    "discounts": number or null,
-    "charges": number or null,
-    "billing_period": "string or null",
-    "due_date": "YYYY-MM-DD or null",
-    "account_number": "string or null",
-    "billing_address": "string or null",
-    "bill_to_gst_number": "string or null"
-  },
-  "line_items": [
-    {
-      "description": "string or null",
-      "quantity": number or null,
-      "unit_price": number or null,
-      "total": number or null
-    }
-  ]
-}
-
-Instructions:
-- If you cannot confidently find a field, set it to null instead of guessing.
-- Use the grand total including tax for total_amount if available.
-- If multiple dates exist, use the invoice issue date.
-- Extract all summary information like subtotal, tax, credits, discounts from the invoice.
-- Carefully extract the vendor's full address and any GST/tax identification numbers (e.g., GSTIN, VAT) if present.\n
-- Look near the vendor name for address blocks labeled 'Address', 'Registered Office', or similar.\n
-- Look for GST/tax labels such as 'GST', 'GSTIN', 'GST No', 'GST Number', 'VAT', or other tax IDs.\n
-- When there are two GST numbers on the invoice, map the one associated with the vendor (e.g., near the company name like 'Exafunction, Inc.' or 'From' section) to 'vendors_gst_number', and the one in the 'Bill to' or customer section to summary.bill_to_gst_number (place it inside the summary object, under the billing_address).\n
-- If any address or GST/tax ID appears anywhere on the invoice, do NOT return null for vendor_address, vendors_gst_number, or summary.bill_to_gst_number; instead, return the best-matching value you can find.
-- For billing_period, extract the date range if shown (e.g., "July 1 - July 31, 2014").
-- Respond with strictly valid JSON only, with no markdown and no extra text.
-""".strip()
+            prompt = _get_prompt_for_type(document_type, "Gemini")
 
             def _call_gemini_once() -> Dict[str, Any]:
                 # Feed all pages/images to Gemini in a single call
@@ -662,15 +438,15 @@ Instructions:
                 text = response.text.strip()
                 data = json.loads(text)
 
-                normalized = _normalize_invoice_json(data)
-                normalized["validation"] = validate_invoice(normalized)
+                normalized = _normalize_invoice_json(data, document_type)
+                normalized["validation"] = validate_invoice(normalized, document_type)
                 return normalized
 
             # Single retry with simple validation to reduce inconsistent parses
             last_result = {}
             for attempt in range(2):
                 last_result = _call_gemini_once()
-                if _is_reasonable_invoice(last_result) or attempt == 1:
+                if _is_reasonable_invoice(last_result, document_type) or attempt == 1:
                     return last_result
 
     except Exception as e:

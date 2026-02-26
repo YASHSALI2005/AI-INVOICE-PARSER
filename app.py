@@ -120,16 +120,35 @@ if "confidence" not in st.session_state:
     st.session_state.confidence = None
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
+if "current_file_id" not in st.session_state:
+    st.session_state.current_file_id = None
+if "current_page_index" not in st.session_state:
+    st.session_state.current_page_index = 0
 
 # File Uploader
-st.markdown("### 1. Upload invoice")
+st.markdown("### 1. Upload document")
+document_type = st.selectbox(
+    "Document Type",
+    ["Purchase Order bill", "Sales Invoice bill", "Sales Order bill"],
+    help="Select the type of document you are uploading."
+)
+
 uploaded_file = st.file_uploader(
-    "Drop your invoice here or click to browse",
+    "Drop your document here or click to browse",
     type=["pdf", "jpg", "jpeg", "png"],
     help="Supports PDF and image formats.",
 )
 
 if uploaded_file is not None and api_key:
+    # Clear extraction data if a new file is uploaded
+    if st.session_state.current_file_id != uploaded_file.file_id:
+        st.session_state.current_file_id = uploaded_file.file_id
+        st.session_state.extraction_data = None
+        st.session_state.extraction_id = None
+        st.session_state.confidence = None
+        st.session_state.edit_mode = False
+        st.session_state.current_page_index = 0
+
     st.markdown("### 2. Review & extract")
     col1, col2 = st.columns([1, 1], gap="large")
 
@@ -142,8 +161,27 @@ if uploaded_file is not None and api_key:
                 images = extractor.convert_pdf_to_images(uploaded_file.read())
                 if images:
                     image_to_process = images
-                    st.caption(f"Showing page 1 of {len(images)}")
-                    st.image(images[0], use_container_width=True)
+                    total_pages = len(images)
+                    # Ensure current page index is in range
+                    if st.session_state.current_page_index >= total_pages:
+                        st.session_state.current_page_index = 0
+
+                    current_idx = st.session_state.current_page_index
+                    current_img = images[current_idx]
+
+                    st.image(current_img, use_container_width=True, caption=f"Page {current_idx + 1} of {total_pages}")
+
+                    prev_col, info_col, next_col = st.columns([1, 2, 1])
+                    with prev_col:
+                        if st.button("⬅ Back", disabled=current_idx == 0, key="prev_page_btn"):
+                            st.session_state.current_page_index = max(0, current_idx - 1)
+                            st.rerun()
+                    with info_col:
+                        st.markdown(f"<div style='text-align:center;'>Page {current_idx + 1} of {total_pages}</div>", unsafe_allow_html=True)
+                    with next_col:
+                        if st.button("Next ➡", disabled=current_idx == total_pages - 1, key="next_page_btn"):
+                            st.session_state.current_page_index = min(total_pages - 1, current_idx + 1)
+                            st.rerun()
                 else:
                     st.error("Failed to convert PDF.")
         else:
@@ -169,6 +207,7 @@ if uploaded_file is not None and api_key:
                             data = hybrid_extractor.hybrid_extract_invoice(
                                 tmp_path, image_to_process, api_key,
                                 provider=provider, model_name=model_name,
+                                document_type=document_type,
                             )
                             st.session_state.extraction_data = data
                     finally:
@@ -179,6 +218,7 @@ if uploaded_file is not None and api_key:
                         data = extractor.extract_invoice_data(
                             image_to_process, api_key,
                             provider=provider, model_name=model_name,
+                            document_type=document_type,
                         )
                         st.session_state.extraction_data = data
                 
@@ -263,19 +303,64 @@ if uploaded_file is not None and api_key:
                     if st.session_state.edit_mode:
                         # Editable form
                         st.markdown("##### Edit extracted data")
-                        st.caption("Change any field below and click **Save Corrections**.")
+                        st.caption("Change any field below and click **Save Corrections**. (Maps to common fields)")
+                        
+                        # Use first available field from various schemas mapping to common concepts
+                        doc_number = display_data.get("invoice_number") or display_data.get("po_number") or display_data.get("order_number") or ""
+                        doc_date = display_data.get("date") or display_data.get("date_of_issue") or display_data.get("order_date") or ""
+                        
+                        summary_data = display_data.get("summary", {})
+                        doc_total = (
+                            display_data.get("total_amount") or 
+                            display_data.get("total_amount_due") or 
+                            display_data.get("order_total") or 
+                            summary_data.get("total_amount_due") or
+                            summary_data.get("order_total") or
+                            summary_data.get("total_commitment") or 0
+                        )
+                        doc_vendor = display_data.get("vendor_name") or display_data.get("from") or display_data.get("seller") or ""
+                        
                         with st.form("correction_form", clear_on_submit=False):
-                            edited_invoice_number = st.text_input("Invoice Number", value=str(display_data.get("invoice_number") or ""))
-                            edited_date = st.text_input("Date (YYYY-MM-DD)", value=str(display_data.get("date") or ""))
+                            edited_invoice_number = st.text_input("Document Number", value=str(doc_number))
+                            edited_date = st.text_input("Date (YYYY-MM-DD)", value=str(doc_date))
                             edited_currency = st.text_input("Currency", value=str(display_data.get("currency") or ""))
-                            edited_amount = st.number_input("Total Amount", value=float(display_data.get("total_amount") or 0))
-                            edited_vendor = st.text_input("Vendor Name", value=str(display_data.get("vendor_name") or ""))
+                            edited_amount = st.number_input("Total Amount", value=float(doc_total))
+                            edited_vendor = st.text_input("Provider/Vendor", value=str(doc_vendor))
                             
                             # Summary fields
                             st.markdown("##### Summary")
                             summary = display_data.get("summary", {})
-                            edited_subtotal = st.number_input("Subtotal", value=float(summary.get("subtotal", 0) or 0))
-                            edited_tax = st.number_input("Tax", value=float(summary.get("tax", 0) or 0))
+                            sub = summary.get("subtotal") or summary.get("order_subtotal") or summary.get("total_usage_sale_charges") or 0
+
+                            # Derive a tax AMOUNT, not percentage
+                            tax = None
+
+                            # 1) Prefer explicit tax fields from summary
+                            if summary.get("tax") is not None:
+                                tax = summary.get("tax")
+                            elif summary.get("tax_amount") is not None:
+                                tax = summary.get("tax_amount")
+
+                            # 2) If hybrid extractor provided additional_info.tax_amount, prefer that next
+                            if tax is None:
+                                add_info = display_data.get("additional_info", {})
+                                if isinstance(add_info, dict) and add_info.get("tax_amount") is not None:
+                                    tax = add_info.get("tax_amount")
+
+                            # 3) For Sales Invoice, convert percentage to amount if needed
+                            if tax is None and document_type == "Sales Invoice bill":
+                                tax_pct = summary.get("tax_percentage")
+                                if isinstance(tax_pct, (int, float)) and isinstance(sub, (int, float)):
+                                    tax = float(sub) * float(tax_pct) / 100.0
+
+                            # 4) Fallback: sum line-item taxes
+                            if tax is None:
+                                lines = display_data.get("line_items") or display_data.get("charges") or display_data.get("order_items") or []
+                                tax = sum((item.get("tax_amount") or 0) for item in lines if isinstance(item, dict))
+
+                            edited_subtotal = st.number_input("Subtotal/Charges", value=float(sub))
+                            tax_help = "Derived from summary / additional_info when available, otherwise sum of line-item taxes."
+                            edited_tax = st.number_input("Tax", value=float(tax or 0), help=tax_help)
                             
                             submitted = st.form_submit_button("💾 Save Corrections")
                             
@@ -291,17 +376,17 @@ if uploaded_file is not None and api_key:
                                 corrected_data["summary"]["subtotal"] = edited_subtotal
                                 corrected_data["summary"]["tax"] = edited_tax
                                 
-                                # Find changed fields
+                                # Find changed fields (simplify for common fields)
                                 changed_fields = []
-                                if edited_invoice_number != display_data.get("invoice_number"):
+                                if edited_invoice_number != str(doc_number):
                                     changed_fields.append("invoice_number")
-                                if edited_date != display_data.get("date"):
+                                if edited_date != str(doc_date):
                                     changed_fields.append("date")
                                 if edited_currency != display_data.get("currency"):
                                     changed_fields.append("currency")
-                                if edited_amount != display_data.get("total_amount"):
+                                if edited_amount != float(doc_total):
                                     changed_fields.append("total_amount")
-                                if edited_vendor != display_data.get("vendor_name"):
+                                if edited_vendor != str(doc_vendor):
                                     changed_fields.append("vendor_name")
                                 
                                 # Save correction to database
@@ -330,11 +415,26 @@ if uploaded_file is not None and api_key:
                     else:
                         # View mode - show metrics
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("Total", f"{display_data.get('total_amount', 0)} {display_data.get('currency', '')}")
-                        m2.metric("Date", display_data.get("date", "N/A"))
-                        m3.metric("Invoice #", display_data.get("invoice_number", "N/A"))
                         
-                        st.success(f"Vendor: **{display_data.get('vendor_name', 'Unknown')}**")
+                        doc_number = display_data.get("invoice_number") or display_data.get("po_number") or display_data.get("order_number") or ""
+                        doc_date = display_data.get("date") or display_data.get("date_of_issue") or display_data.get("order_date") or ""
+                        
+                        summary_data = display_data.get("summary", {})
+                        doc_total = (
+                            display_data.get("total_amount") or 
+                            display_data.get("total_amount_due") or 
+                            display_data.get("order_total") or 
+                            summary_data.get("total_amount_due") or
+                            summary_data.get("order_total") or
+                            summary_data.get("total_commitment") or 0
+                        )
+                        doc_vendor = display_data.get("vendor_name") or display_data.get("from") or display_data.get("seller") or ""
+                        
+                        m1.metric("Total", f"{doc_total} {display_data.get('currency', '')}")
+                        m2.metric("Date", doc_date or "N/A")
+                        m3.metric("Document #", doc_number or "N/A")
+                        
+                        st.success(f"Provider/Vendor: **{doc_vendor or 'Unknown'}**")
                         
                         # Summary
                         summary = display_data.get("summary", {})
@@ -343,8 +443,41 @@ if uploaded_file is not None and api_key:
                                 s1, s2 = st.columns(2)
                                 if summary.get("subtotal") is not None:
                                     s1.metric("Subtotal", f"{summary.get('subtotal')} {display_data.get('currency', '')}")
+
+                                # Derive a tax AMOUNT, not percentage
+                                tax_val = None
+
+                                # 1) Prefer explicit tax fields from summary
                                 if summary.get("tax") is not None:
-                                    s2.metric("Tax", f"{summary.get('tax')} {display_data.get('currency', '')}")
+                                    tax_val = summary.get("tax")
+                                elif summary.get("tax_amount") is not None:
+                                    tax_val = summary.get("tax_amount")
+
+                                # 2) If hybrid extractor provided additional_info.tax_amount, prefer that next
+                                if tax_val is None:
+                                    add_info = display_data.get("additional_info", {})
+                                    if isinstance(add_info, dict) and add_info.get("tax_amount") is not None:
+                                        tax_val = add_info.get("tax_amount")
+
+                                # 3) For Sales Invoice, convert percentage to amount if needed
+                                if tax_val is None and document_type == "Sales Invoice bill":
+                                    subtotal_for_tax = (
+                                        summary.get("subtotal")
+                                        or summary.get("order_subtotal")
+                                        or summary.get("total_usage_sale_charges")
+                                    )
+                                    tax_pct = summary.get("tax_percentage")
+                                    if isinstance(tax_pct, (int, float)) and isinstance(subtotal_for_tax, (int, float)):
+                                        tax_val = float(subtotal_for_tax) * float(tax_pct) / 100.0
+
+                                # 4) Fallback: sum line-item taxes
+                                if tax_val is None:
+                                    lines = display_data.get("line_items") or display_data.get("charges") or display_data.get("order_items") or []
+                                    tax_val = sum((item.get("tax_amount") or 0) for item in lines if isinstance(item, dict))
+
+                                if tax_val is not None:
+                                    tax_help = "Derived from summary / additional_info when available, otherwise sum of line-item taxes."
+                                    s2.metric("Tax", f"{tax_val} {display_data.get('currency', '')}", help=tax_help)
                                 
                                 if summary.get("billing_period"):
                                     st.text(f"Billing Period: {summary.get('billing_period')}")
@@ -355,8 +488,9 @@ if uploaded_file is not None and api_key:
                         tab1, tab2, tab3 = st.tabs(["📝 Line Items", "📊 Details", "🧠 Learning"])
                         
                         with tab1:
-                            if "line_items" in display_data and isinstance(display_data["line_items"], list):
-                                df = pd.DataFrame(display_data["line_items"])
+                            lines = display_data.get("line_items") or display_data.get("charges") or display_data.get("order_items")
+                            if lines and isinstance(lines, list):
+                                df = pd.DataFrame(lines)
                                 st.dataframe(df, use_container_width=True)
                             else:
                                 st.info("No line items found.")
