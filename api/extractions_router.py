@@ -2,6 +2,7 @@
 import hashlib
 import tempfile
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -428,8 +429,13 @@ async def upload_invoices_batch(
 @router.get("/invoices")
 def list_invoices(
     limit: int = 50,
+    page: int = 1,
     search: Optional[str] = None,
     status: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -438,15 +444,44 @@ def list_invoices(
     Query params:
     - search: case-insensitive search on vendor_name or invoice_number
     - status: filter by status (pending, in_progress, completed, error)
+    - date_from / date_to: filter by invoice_date range (ISO date)
+    - min_amount / max_amount: filter by total_amount range
     """
-    from sqlalchemy import or_
+    from sqlalchemy import or_, func
 
     db_session = SessionLocal()
     try:
-        q = db_session.query(AiInvoice).order_by(AiInvoice.created_at.desc())
+        if page < 1:
+            page = 1
+
+        q = db_session.query(AiInvoice)
         if status:
             q = q.filter(AiInvoice.status == status)
-        rows = q.limit(min(limit, 100)).all()
+        if date_from:
+            q = q.filter(AiInvoice.invoice_date >= date_from)
+        if date_to:
+            q = q.filter(AiInvoice.invoice_date <= date_to)
+        if min_amount is not None:
+            q = q.filter(AiInvoice.total_amount >= min_amount)
+        if max_amount is not None:
+            q = q.filter(AiInvoice.total_amount <= max_amount)
+        if search:
+            term = f"%{search.lower()}%"
+            q = q.filter(
+                or_(
+                    func.lower(AiInvoice.vendor_name).like(term),
+                    func.lower(AiInvoice.invoice_number).like(term),
+                )
+            )
+
+        total = q.count()
+
+        q = q.order_by(AiInvoice.created_at.desc())
+        rows = (
+            q.offset((page - 1) * limit)
+            .limit(min(limit, 100))
+            .all()
+        )
 
         out: List[Dict[str, Any]] = []
         for row in rows:
@@ -479,17 +514,12 @@ def list_invoices(
                 }
             )
 
-        # Apply search on the materialized list so we can also search into derived vendor/invoice fields.
-        if search:
-            term = search.lower()
-            out = [
-                item
-                for item in out
-                if (item.get("vendor_name") or "").lower().find(term) != -1
-                or (item.get("invoice_number") or "").lower().find(term) != -1
-            ]
-
-        return {"items": out}
+        return {
+            "items": out,
+            "total": total,
+            "page": page,
+            "limit": limit,
+        }
     finally:
         db_session.close()
 
