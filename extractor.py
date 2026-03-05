@@ -24,19 +24,23 @@ def get_poppler_path():
 def convert_pdf_to_images(file_input: Union[str, bytes]) -> List[Image.Image]:
     """
     Converts a PDF file (path or bytes) to a list of PIL Images.
+    Raises RuntimeError with a helpful message if conversion fails (e.g. poppler not installed).
     """
     poppler_path = get_poppler_path()
     try:
         if isinstance(file_input, str):
-             # It's a file path
             images = convert_from_path(file_input, poppler_path=poppler_path)
         else:
-            # It's bytes (from Streamlit upload)
             images = convert_from_bytes(file_input, poppler_path=poppler_path)
-        return images
+        return images if images else []
     except Exception as e:
-        print(f"Error converting PDF to image: {e}")
-        return []
+        err = str(e).strip() or repr(e)
+        if "pdftoppm" in err.lower() or "poppler" in err.lower() or "Unable to get page count" in err:
+            raise RuntimeError(
+                "PDF conversion failed: Poppler is required but not found. "
+                "On macOS run: brew install poppler. On Ubuntu/Debian: sudo apt install poppler-utils."
+            ) from e
+        raise RuntimeError(f"PDF conversion failed: {err}") from e
 
 def list_gemini_models(api_key: str) -> List[str]:
     """

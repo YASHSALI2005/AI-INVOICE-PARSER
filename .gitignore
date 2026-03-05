@@ -95,3 +95,4 @@ invoice2data_repo/
 # Misc
 *.sqlite3
 *.db
+README_FASTAPI.md

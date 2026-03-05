@@ -7,6 +7,14 @@ Pillow
 openai
 anthropic
 openpyxl
+# FastAPI backend
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+python-multipart
+requests
 # For hybrid mode (template + LLM):
 # Install invoice2data from the local repo: pip install -e invoice2data_repo
 # Or install from PyPI: pip install invoice2data
