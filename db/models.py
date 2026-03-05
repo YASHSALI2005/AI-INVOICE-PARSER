@@ -96,6 +96,7 @@ class AiInvoice(Base):
     __tablename__ = "ai_invoice"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("auth_users.id", ondelete="CASCADE"), nullable=True, index=True)
     extraction_id = Column(String(24), ForeignKey("extractions.id", ondelete="SET NULL"), nullable=True, index=True)
     vendor_name = Column(String(512), nullable=True, index=True)
     invoice_number = Column(String(128), nullable=True, index=True)

@@ -381,6 +381,7 @@ async def upload_invoices_batch(
                 file_path = tmp.name
 
             invoice = AiInvoice(
+                user_id=user.id,
                 extraction_id=None,
                 vendor_name=None,
                 invoice_number=None,
@@ -454,7 +455,7 @@ def list_invoices(
         if page < 1:
             page = 1
 
-        q = db_session.query(AiInvoice)
+        q = db_session.query(AiInvoice).filter(AiInvoice.user_id == user.id)
         if status:
             q = q.filter(AiInvoice.status == status)
         if date_from:
@@ -537,7 +538,11 @@ def delete_invoice(
     """
     db_session = SessionLocal()
     try:
-        invoice = db_session.query(AiInvoice).filter(AiInvoice.id == invoice_id).first()
+        invoice = (
+            db_session.query(AiInvoice)
+            .filter(AiInvoice.id == invoice_id, AiInvoice.user_id == user.id)
+            .first()
+        )
         if not invoice:
             raise HTTPException(status_code=404, detail="Invoice not found")
         db_session.delete(invoice)
