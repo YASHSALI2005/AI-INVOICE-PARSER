@@ -123,6 +123,11 @@ def _perform_extraction_from_bytes(
         )
         display_data = data if isinstance(data, dict) else {}
 
+    # Persist the selected document_type alongside extracted data so it is
+    # available in downstream UIs (e.g. edit screen bill type).
+    if isinstance(display_data, dict) and document_type:
+        display_data.setdefault("document_type", document_type)
+
     if "error" in display_data:
         return {
             "error": display_data.get("error"),
@@ -229,6 +234,27 @@ def save_correction(extraction_id: str, body: CorrectionBody, user: User = Depen
     )
     if not ok:
         raise HTTPException(status_code=404, detail="Extraction not found")
+    # Also update AiInvoice document_type if this extraction is linked to an AiInvoice row
+    # and the user edited the bill/document type field.
+    if "document_type" in body.corrected_fields:
+        from db.database import SessionLocal  # local import to avoid circulars at import time
+        from db.models import AiInvoice
+
+        session = SessionLocal()
+        try:
+            invoice = (
+                session.query(AiInvoice)
+                .filter(AiInvoice.extraction_id == extraction_id, AiInvoice.user_id == user.id)
+                .first()
+            )
+            if invoice is not None:
+                invoice.document_type = body.corrected_data.get("document_type")  # type: ignore[assignment]
+                invoice.updated_at = datetime.utcnow()
+                session.add(invoice)
+                session.commit()
+        finally:
+            session.close()
+
     return {"success": True}
 
 
@@ -433,6 +459,7 @@ def list_invoices(
     page: int = 1,
     search: Optional[str] = None,
     status: Optional[str] = None,
+    document_type: Optional[str] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     min_amount: Optional[float] = None,
@@ -445,6 +472,7 @@ def list_invoices(
     Query params:
     - search: case-insensitive search on vendor_name or invoice_number
     - status: filter by status (pending, in_progress, completed, error)
+    - document_type: filter by exact document/bill type
     - date_from / date_to: filter by invoice_date range (ISO date)
     - min_amount / max_amount: filter by total_amount range
     """
@@ -458,6 +486,8 @@ def list_invoices(
         q = db_session.query(AiInvoice).filter(AiInvoice.user_id == user.id)
         if status:
             q = q.filter(AiInvoice.status == status)
+        if document_type:
+            q = q.filter(AiInvoice.document_type == document_type)
         if date_from:
             q = q.filter(AiInvoice.invoice_date >= date_from)
         if date_to:
