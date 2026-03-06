@@ -2,7 +2,7 @@
 import hashlib
 import tempfile
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -270,6 +270,61 @@ def stats(user: User = Depends(get_current_user)):
     """Database stats: extractions, templates, corrections, vendors."""
     db = get_database()
     return db.get_stats()
+
+
+@router.get("/dashboard/stats")
+def dashboard_stats(user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """Aggregated dashboard metrics for the current user."""
+    db_session = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=30)
+
+        base_q = db_session.query(AiInvoice).filter(AiInvoice.user_id == user.id)
+
+        total_invoices = base_q.count()
+        invoices_last_30d = (
+            base_q.filter(AiInvoice.created_at >= cutoff).count()
+        )
+        failed_invoices = base_q.filter(AiInvoice.status == "error").count()
+        pending_invoices = (
+            base_q.filter(AiInvoice.status.in_(["pending", "in_progress"])).count()
+        )
+
+        credit_q = base_q.filter(
+            AiInvoice.document_type == "Credit bill",
+            AiInvoice.created_at >= cutoff,
+        )
+        debit_q = base_q.filter(
+            AiInvoice.document_type == "Debit bill",
+            AiInvoice.created_at >= cutoff,
+        )
+
+        credit_total_30d = sum(row.total_amount or 0 for row in credit_q.all())
+        debit_total_30d = sum(row.total_amount or 0 for row in debit_q.all())
+        net_cash_flow_30d = credit_total_30d - debit_total_30d
+
+        from db.models import InvoiceAudit  # local import to avoid circular import at module load
+
+        audits_q = db_session.query(InvoiceAudit).filter(
+            InvoiceAudit.user_id == user.id
+        )
+        total_audits = audits_q.count()
+        audits_last_30d = audits_q.filter(InvoiceAudit.created_at >= cutoff).count()
+
+        return {
+            "total_invoices": total_invoices,
+            "invoices_last_30d": invoices_last_30d,
+            "failed_invoices": failed_invoices,
+            "pending_invoices": pending_invoices,
+            "credit_total_30d": credit_total_30d,
+            "debit_total_30d": debit_total_30d,
+            "net_cash_flow_30d": net_cash_flow_30d,
+            "total_audits": total_audits,
+            "audits_last_30d": audits_last_30d,
+        }
+    finally:
+        db_session.close()
 
 
 def _update_ai_invoice_status(
