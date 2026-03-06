@@ -108,3 +108,25 @@ class AiInvoice(Base):
     status = Column(String(32), default="pending")  # e.g. pending, verified, rejected
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class InvoiceAudit(Base):
+    """Saved audit comparing a final invoice with one or more supporting invoices."""
+    __tablename__ = "invoice_audits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("auth_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    final_invoice_id = Column(Integer, ForeignKey("ai_invoice.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class InvoiceAuditItem(Base):
+    """Link table: each row associates one supporting invoice with an audit."""
+    __tablename__ = "invoice_audit_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    audit_id = Column(Integer, ForeignKey("invoice_audits.id", ondelete="CASCADE"), nullable=False, index=True)
+    invoice_id = Column(Integer, ForeignKey("ai_invoice.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

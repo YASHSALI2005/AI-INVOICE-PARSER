@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.auth_router import router as auth_router
 from api.extractions_router import router as extractions_router
+from api.invoice_audits_router import router as invoice_audits_router
 
 logger = logging.getLogger("uvicorn.error")
 db_ready = False
@@ -53,6 +54,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(extractions_router)
+app.include_router(invoice_audits_router)
 
 
 @app.get("/health")
