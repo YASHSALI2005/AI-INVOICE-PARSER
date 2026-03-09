@@ -21,7 +21,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # In-memory OTP store: { phone: { "otp": str, "expires_at": float } }
 _otp_store: Dict[str, dict] = {}
 OTP_TTL_SECONDS = 300  # 5 minutes
-SESSION_TTL_DAYS = 30
+SESSION_TTL_HOURS = 8
 
 
 def _generate_otp(length: int = 6) -> str:
@@ -110,7 +110,7 @@ def verify_otp(body: VerifyOtpBody, db: Session = Depends(get_db)):
 
     # Create session
     token = "".join(random.choices(string.ascii_letters + string.digits, k=32))
-    expires_at = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+    expires_at = datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)
     session = SessionModel(token=token, user_id=user.id, expires_at=expires_at)
     db.add(session)
     db.commit()
