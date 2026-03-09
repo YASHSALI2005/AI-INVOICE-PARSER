@@ -66,6 +66,11 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
         schema = '''{
   "from": "string or null",
   "to": "string or null",
+  "pan": "string or null",
+  "gstin": "string or null",
+  "msme": "string or null",
+  "bank_account_number": "string or null",
+  "ifsc": "string or null",
   "po_number": "string or null",
   "date_of_issue": "YYYY-MM-DD or null",
   "delivery_expected_by": "YYYY-MM-DD or null",
@@ -73,11 +78,17 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
   "line_items": [ { "item_description": "string or null", "quantity": 0.0, "unit_price": 0.0, "tax_amount": 0.0, "total": 0.0 } ]
 }'''
         rules = """- One row in the main table = one line_item.
-- IMPORTANT: Extract 'tax_amount' ONLY if it is literally printed on that specific line. Do NOT calculate it yourself."""
+- IMPORTANT: Extract 'tax_amount' ONLY if it is literally printed on that specific line. Do NOT calculate it yourself.
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
     elif document_type == "Sales Order bill":
         schema = '''{
   "seller": "string or null",
   "buyer": "string or null",
+  "pan": "string or null",
+  "gstin": "string or null",
+  "msme": "string or null",
+  "bank_account_number": "string or null",
+  "ifsc": "string or null",
   "order_number": "string or null",
   "order_date": "YYYY-MM-DD or null",
   "status": "string or null (Confirmed or Pending Fulfillment)",
@@ -85,7 +96,8 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
   "order_items": [ { "product_code": "string or null", "description": "string or null", "qty": 0.0, "unit_price": 0.0 } ]
 }'''
         rules = """- One row in the main table = one order_item.
-- IMPORTANT: Extract 'tax_amount' from the summary section matching the document total tax. Do NOT calculate it yourself."""
+- IMPORTANT: Extract 'tax_amount' from the summary section matching the document total tax. Do NOT calculate it yourself.
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
     else: # Sales Invoice bill
         schema = '''{
   "from": "string or null",
@@ -93,10 +105,16 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
   "invoice_number": "string or null",
   "date_of_issue": "YYYY-MM-DD or null",
   "payment_due_date": "YYYY-MM-DD or null",
+  "pan": "string or null",
+  "gstin": "string or null",
+  "msme": "string or null",
+  "bank_account_number": "string or null",
+  "ifsc": "string or null",
   "summary": { "total_usage_sale_charges": 0.0, "tax_percentage": 0.0, "total_amount_due": 0.0 },
   "charges": [ { "description": "string or null", "quantity_hours": 0.0, "rate": 0.0, "amount": 0.0 } ]
 }'''
-        rules = "- One row in the main billable services table = one charge item."
+        rules = """- One row in the main billable services table = one charge item.
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
 
     if provider in ["Claude", "OpenAI"]:
         return f"Extract {document_type} data into a SINGLE JSON object with EXACTLY this schema:\n{schema}\n\nRules:\n- Do NOT guess values. If unreadable or missing, use null.\n- Copy numbers exactly as shown.\n{rules}\n- Respond with ONLY valid JSON. No markdown. No explanation."
