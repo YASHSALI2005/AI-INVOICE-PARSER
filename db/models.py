@@ -1,6 +1,6 @@
 """SQLAlchemy models for PostgreSQL."""
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Boolean, DateTime, Text, ForeignKey, Integer
+from sqlalchemy import Column, String, Float, Boolean, DateTime, Text, ForeignKey, Integer, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
@@ -94,10 +94,14 @@ class Session(Base):
 class AiInvoice(Base):
     """AI-parsed invoice record (normalized fields + optional link to extraction)."""
     __tablename__ = "ai_invoice"
+    __table_args__ = (
+        UniqueConstraint("user_id", "file_hash", name="uq_ai_invoice_user_file_hash"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("auth_users.id", ondelete="CASCADE"), nullable=True, index=True)
     extraction_id = Column(String(24), ForeignKey("extractions.id", ondelete="SET NULL"), nullable=True, index=True)
+    file_hash = Column(String(64), nullable=True, index=True)
     vendor_name = Column(String(512), nullable=True, index=True)
     invoice_number = Column(String(128), nullable=True, index=True)
     document_type = Column(String(64), nullable=True)  # e.g. Sales Invoice bill, Purchase Order bill

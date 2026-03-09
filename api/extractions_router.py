@@ -280,7 +280,13 @@ def dashboard_stats(user: User = Depends(get_current_user)) -> Dict[str, Any]:
         now = datetime.utcnow()
         cutoff = now - timedelta(days=30)
 
-        base_q = db_session.query(AiInvoice).filter(AiInvoice.user_id == user.id)
+        base_q = (
+            db_session.query(AiInvoice)
+            .filter(
+                AiInvoice.user_id == user.id,
+                AiInvoice.status != "duplicate",
+            )
+        )
 
         total_invoices = base_q.count()
         invoices_last_30d = (
@@ -342,10 +348,13 @@ def _update_ai_invoice_status(
         invoice = db_session.query(AiInvoice).filter(AiInvoice.id == ai_invoice_id).first()
         if not invoice:
             return
+
         invoice.status = status
         invoice.updated_at = datetime.utcnow()
+
         if error:
             invoice.raw_data = {"error": error}
+
         if extraction_payload is not None:
             data = extraction_payload or {}
             summary = data.get("summary") or {}
@@ -369,12 +378,60 @@ def _update_ai_invoice_status(
                 or data.get("order_number")
             )
 
+            # Attempt to parse an invoice date from common fields.
+            raw_date = (
+                data.get("invoice_date")
+                or data.get("date_of_issue")
+                or data.get("order_date")
+                or data.get("date")
+            )
+            invoice_date = None
+            if isinstance(raw_date, str) and raw_date.strip():
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+                    try:
+                        invoice_date = datetime.strptime(raw_date.strip(), fmt)
+                        break
+                    except ValueError:
+                        continue
+
             invoice.extraction_id = extraction_id
             invoice.vendor_name = vendor_name
             invoice.invoice_number = invoice_number
             invoice.total_amount = total
             invoice.currency = data.get("currency")
+            invoice.invoice_date = invoice_date
             invoice.raw_data = data
+
+            # Logical duplicate detection based on business keys once we have a payload.
+            if (
+                status == "completed"
+                and invoice.user_id is not None
+                and vendor_name
+                and invoice_number
+                and invoice_date is not None
+                and total is not None
+            ):
+                duplicate = (
+                    db_session.query(AiInvoice)
+                    .filter(
+                        AiInvoice.user_id == invoice.user_id,
+                        AiInvoice.id != invoice.id,
+                        AiInvoice.vendor_name == vendor_name,
+                        AiInvoice.invoice_number == invoice_number,
+                        AiInvoice.invoice_date == invoice_date,
+                        AiInvoice.total_amount == total,
+                        AiInvoice.status != "error",
+                        AiInvoice.status != "duplicate",
+                    )
+                    .first()
+                )
+                if duplicate:
+                    # We already have an invoice with the same business keys for this user.
+                    # Remove this duplicate entry so it does not appear in tables or metrics.
+                    db_session.delete(invoice)
+                    db_session.commit()
+                    return
+
         db_session.commit()
     finally:
         db_session.close()
@@ -454,10 +511,39 @@ async def upload_invoices_batch(
         for f in files:
             if not f.filename:
                 continue
-            # Persist file so the background worker can read it later
+
+            # Read content once so we can both hash it and persist it for the worker.
+            content = await f.read()
+            if not content:
+                continue
+
+            # Strong file-level hash used for exact duplicate detection.
+            file_hash = hashlib.sha256(content).hexdigest()
+
+            # Check for an existing non-error invoice for this user and file hash.
+            existing = (
+                db_session.query(AiInvoice)
+                .filter(
+                    AiInvoice.user_id == user.id,
+                    AiInvoice.file_hash == file_hash,
+                    AiInvoice.status != "error",
+                )
+                .first()
+            )
+            if existing:
+                # Treat as duplicate: don't enqueue a new job, just surface the existing invoice.
+                created.append(
+                    {
+                        "id": existing.id,
+                        "file_name": f.filename,
+                        "status": "duplicate",
+                    }
+                )
+                continue
+
+            # Persist file so the background worker can read it later.
             suffix = ".pdf" if (f.content_type or "").lower() == "application/pdf" else ".png"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                content = await f.read()
                 tmp.write(content)
                 file_path = tmp.name
 
@@ -472,6 +558,7 @@ async def upload_invoices_batch(
                 currency=None,
                 raw_data=None,
                 status="pending",
+                file_hash=file_hash,
             )
             db_session.add(invoice)
             db_session.commit()
@@ -495,13 +582,6 @@ async def upload_invoices_batch(
                     "status": invoice.status,
                 }
             )
-    except Exception:
-        # If anything fails during setup, make sure we don't leave temp files around.
-        for item in created:
-            path = item.get("file_path")
-            if path and os.path.exists(path):
-                os.unlink(path)
-        raise
     finally:
         db_session.close()
 
@@ -541,6 +621,9 @@ def list_invoices(
         q = db_session.query(AiInvoice).filter(AiInvoice.user_id == user.id)
         if status:
             q = q.filter(AiInvoice.status == status)
+        else:
+            # By default, hide invoices marked as logical duplicates from listings and counts.
+            q = q.filter(AiInvoice.status != "duplicate")
         if document_type:
             q = q.filter(AiInvoice.document_type == document_type)
         if date_from:
