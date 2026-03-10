@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     idfy_gstin_url: str = os.getenv("IDFY_GSTIN_URL", "")
     # Tasks polling endpoint, e.g. https://eve.idfy.com/v3/tasks
     idfy_tasks_url: str = os.getenv("IDFY_TASKS_URL", "")
+    idfy_pan_url: str = os.getenv("IDFY_PAN_URL", "")
     idfy_msme_url: str = os.getenv("IDFY_MSME_URL", "")
     idfy_bank_ifsc_url: str = os.getenv("IDFY_BANK_IFSC_URL", "")
 

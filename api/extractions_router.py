@@ -11,7 +11,7 @@ import extractor
 from confidence_scorer import calculate_confidence
 from invoice_db import get_database
 from template_generator import generate_template, should_generate_template
-from idfy_client import verify_gstin, verify_msme, verify_bank_account
+from idfy_client import verify_pan, verify_gstin, verify_msme, verify_bank_account
 
 from api.deps import get_current_user
 from db.database import SessionLocal
@@ -307,6 +307,43 @@ def save_correction(extraction_id: str, body: CorrectionBody, user: User = Depen
             session.close()
 
     return {"success": True}
+
+
+class VerifyPanBody(BaseModel):
+    full_name: str
+    date_of_birth: str  # YYYY-MM-DD
+
+
+@router.post("/extractions/{extraction_id}/verify-pan")
+def verify_pan_endpoint(
+    extraction_id: str,
+    body: VerifyPanBody,
+    user: User = Depends(get_current_user),
+):
+    """Verify PAN on an extraction using IDfy (requires full name + DOB)."""
+    from db.models import Extraction as ExtractionModel
+
+    session = SessionLocal()
+    try:
+        row = session.query(ExtractionModel).filter(ExtractionModel.id == extraction_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Extraction not found")
+
+        data: Dict[str, Any] = dict(row.data) if row.data else {}
+        pan = data.get("pan") or data.get("PAN") or data.get("pan_number") or ""
+        if not pan:
+            raise HTTPException(status_code=400, detail="No PAN found in extraction data")
+
+        status = verify_pan(str(pan).strip(), body.full_name.strip(), body.date_of_birth.strip())
+        data["pan_status"] = status
+        row.data = data
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(row, "data")
+        session.commit()
+
+        return {"pan_status": status}
+    finally:
+        session.close()
 
 
 @router.get("/vendors")
