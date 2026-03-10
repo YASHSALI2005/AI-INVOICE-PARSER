@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
 
+    # IDfy verification (GSTIN / MSME / bank account)
+    idfy_account_id: str = os.getenv("IDFY_ACCOUNT_ID", "")
+    idfy_api_key: str = os.getenv("IDFY_API_KEY", "")
+    # Optional override URLs for specific verification APIs. If left empty,
+    # IDfy validation will be skipped.
+    # Async GST creation endpoint, e.g. https://eve.idfy.com/v3/tasks/async/verify_with_source/ind_gst_certificate
+    idfy_gstin_url: str = os.getenv("IDFY_GSTIN_URL", "")
+    # Tasks polling endpoint, e.g. https://eve.idfy.com/v3/tasks
+    idfy_tasks_url: str = os.getenv("IDFY_TASKS_URL", "")
+    idfy_msme_url: str = os.getenv("IDFY_MSME_URL", "")
+    idfy_bank_ifsc_url: str = os.getenv("IDFY_BANK_IFSC_URL", "")
+
     class Config:
         env_file = ".env"
         extra = "ignore"

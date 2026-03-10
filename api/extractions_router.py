@@ -11,6 +11,7 @@ import extractor
 from confidence_scorer import calculate_confidence
 from invoice_db import get_database
 from template_generator import generate_template, should_generate_template
+from idfy_client import verify_gstin, verify_msme, verify_bank_account
 
 from api.deps import get_current_user
 from db.database import SessionLocal
@@ -35,6 +36,48 @@ def _get_api_key(provider: str) -> str:
     if provider == "Claude":
         return s.claude_api_key or ""
     return ""
+
+
+def _enrich_with_idfy_checks(data: Dict[str, Any]) -> None:
+    """
+    For extracted invoice payload `data`, call IDfy (if configured) to validate
+    GSTIN, MSME registration, and bank account + IFSC, and attach status fields.
+
+    Status fields are:
+      - gstin_status: 'valid' | 'invalid' | 'unknown' | 'error'
+      - msme_status: same
+      - bank_account_status: same
+      - ifsc_status: same (mirrors bank_account_status when both are checked)
+    """
+    # GSTIN
+    gstin = data.get("gstin")
+    if isinstance(gstin, str) and gstin.strip():
+        data["gstin_status"] = verify_gstin(gstin.strip())
+
+    # MSME registration
+    msme = (
+        data.get("msme")
+        or data.get("MSME")
+        or data.get("msme_number")
+    )
+    if isinstance(msme, str) and msme.strip():
+        data["msme_status"] = verify_msme(msme.strip())
+
+    # Bank account + IFSC
+    account = (
+        data.get("bank_account_number")
+        or data.get("account_number")
+        or data.get("account_no")
+    )
+    ifsc = data.get("ifsc") or data.get("IFSC") or data.get("ifsc_code")
+
+    if isinstance(account, (str, int)) and isinstance(ifsc, str):
+        account_str = str(account).strip()
+        ifsc_str = ifsc.strip()
+        if account_str and ifsc_str:
+            status = verify_bank_account(account_str, ifsc_str)
+            data["bank_account_status"] = status
+            data["ifsc_status"] = status
 
 
 def _perform_extraction_from_bytes(
@@ -127,6 +170,14 @@ def _perform_extraction_from_bytes(
     # available in downstream UIs (e.g. edit screen bill type).
     if isinstance(display_data, dict) and document_type:
         display_data.setdefault("document_type", document_type)
+
+    # Enrich with IDfy verification statuses for GSTIN / MSME / bank account + IFSC.
+    if isinstance(display_data, dict):
+        try:
+            _enrich_with_idfy_checks(display_data)
+        except Exception:
+            # If IDfy is misconfigured or unavailable, we keep extraction data as-is.
+            pass
 
     if "error" in display_data:
         return {
