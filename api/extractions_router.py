@@ -11,7 +11,15 @@ import extractor
 from confidence_scorer import calculate_confidence
 from invoice_db import get_database
 from template_generator import generate_template, should_generate_template
-from idfy_client import verify_pan, verify_gstin, verify_msme, verify_bank_account
+from idfy_client import (
+    verify_pan,
+    create_pan_task,
+    create_gstin_task,
+    create_msme_task,
+    create_bank_task,
+    resolve_task,
+    resolve_task_with_raw,
+)
 
 from api.deps import get_current_user
 from db.database import SessionLocal
@@ -38,30 +46,44 @@ def _get_api_key(provider: str) -> str:
     return ""
 
 
-def _enrich_with_idfy_checks(data: Dict[str, Any]) -> None:
+def _initiate_idfy_checks(data: Dict[str, Any]) -> None:
     """
-    For extracted invoice payload `data`, call IDfy (if configured) to validate
-    GSTIN, MSME registration, and bank account + IFSC, and attach status fields.
+    Fire-and-forget: create IDfy async verification tasks for fields present
+    in the extraction payload and store their request_ids.  Statuses start as
+    'pending' and are resolved later when the user opens the invoice page.
+    """
+    # PAN — needs name + DOB so we only mark it; verification via button.
+    pan = data.get("pan") or data.get("PAN") or data.get("pan_number")
+    if pan:
+        data.setdefault("pan_status", "unknown")
 
-    Status fields are:
-      - gstin_status: 'valid' | 'invalid' | 'unknown' | 'error'
-      - msme_status: same
-      - bank_account_status: same
-      - ifsc_status: same (mirrors bank_account_status when both are checked)
-    """
     # GSTIN
     gstin = data.get("gstin")
     if isinstance(gstin, str) and gstin.strip():
-        data["gstin_status"] = verify_gstin(gstin.strip())
+        try:
+            rid = create_gstin_task(gstin.strip())
+            if rid:
+                data["gstin_request_id"] = rid
+                data["gstin_status"] = "pending"
+            else:
+                data["gstin_status"] = "unknown"
+        except Exception as e:
+            print(f"[IDfy] GSTIN task creation error: {e}")
+            data["gstin_status"] = "unknown"
 
-    # MSME registration
-    msme = (
-        data.get("msme")
-        or data.get("MSME")
-        or data.get("msme_number")
-    )
+    # MSME / Udyam
+    msme = data.get("msme") or data.get("MSME") or data.get("msme_number")
     if isinstance(msme, str) and msme.strip():
-        data["msme_status"] = verify_msme(msme.strip())
+        try:
+            rid = create_msme_task(msme.strip())
+            if rid:
+                data["msme_request_id"] = rid
+                data["msme_status"] = "pending"
+            else:
+                data["msme_status"] = "unknown"
+        except Exception as e:
+            print(f"[IDfy] MSME task creation error: {e}")
+            data["msme_status"] = "unknown"
 
     # Bank account + IFSC
     account = (
@@ -70,14 +92,23 @@ def _enrich_with_idfy_checks(data: Dict[str, Any]) -> None:
         or data.get("account_no")
     )
     ifsc = data.get("ifsc") or data.get("IFSC") or data.get("ifsc_code")
-
-    if isinstance(account, (str, int)) and isinstance(ifsc, str):
-        account_str = str(account).strip()
-        ifsc_str = ifsc.strip()
+    if account is not None and ifsc is not None:
+        account_str = str(int(account)) if isinstance(account, float) else str(account).strip()
+        ifsc_str = str(ifsc).strip()
         if account_str and ifsc_str:
-            status = verify_bank_account(account_str, ifsc_str)
-            data["bank_account_status"] = status
-            data["ifsc_status"] = status
+            try:
+                rid = create_bank_task(account_str, ifsc_str)
+                if rid:
+                    data["bank_request_id"] = rid
+                    data["bank_account_status"] = "pending"
+                    data["ifsc_status"] = "pending"
+                else:
+                    data["bank_account_status"] = "unknown"
+                    data["ifsc_status"] = "unknown"
+            except Exception as e:
+                print(f"[IDfy] Bank task creation error: {e}")
+                data["bank_account_status"] = "unknown"
+                data["ifsc_status"] = "unknown"
 
 
 def _perform_extraction_from_bytes(
@@ -171,12 +202,11 @@ def _perform_extraction_from_bytes(
     if isinstance(display_data, dict) and document_type:
         display_data.setdefault("document_type", document_type)
 
-    # Enrich with IDfy verification statuses for GSTIN / MSME / bank account + IFSC.
+    # Create IDfy verification tasks (non-blocking) and store request_ids.
     if isinstance(display_data, dict):
         try:
-            _enrich_with_idfy_checks(display_data)
+            _initiate_idfy_checks(display_data)
         except Exception:
-            # If IDfy is misconfigured or unavailable, we keep extraction data as-is.
             pass
 
     if "error" in display_data:
@@ -334,14 +364,102 @@ def verify_pan_endpoint(
         if not pan:
             raise HTTPException(status_code=400, detail="No PAN found in extraction data")
 
-        status = verify_pan(str(pan).strip(), body.full_name.strip(), body.date_of_birth.strip())
+        status, pan_rid = verify_pan(str(pan).strip(), body.full_name.strip(), body.date_of_birth.strip())
         data["pan_status"] = status
+        if pan_rid:
+            data["pan_request_id"] = pan_rid
         row.data = data
         from sqlalchemy.orm.attributes import flag_modified
         flag_modified(row, "data")
         session.commit()
 
-        return {"pan_status": status}
+        return {"pan_status": status, "pan_request_id": pan_rid}
+    finally:
+        session.close()
+
+
+@router.post("/extractions/{extraction_id}/resolve-verifications")
+def resolve_verifications_endpoint(
+    extraction_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Check any pending IDfy verification tasks for this extraction.
+    Resolves stored request_ids → updates statuses in the DB → returns results.
+    """
+    from db.models import Extraction as ExtractionModel
+    from sqlalchemy.orm.attributes import flag_modified
+
+    session = SessionLocal()
+    try:
+        row = session.query(ExtractionModel).filter(ExtractionModel.id == extraction_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Extraction not found")
+
+        data: Dict[str, Any] = dict(row.data) if row.data else {}
+        changed = False
+        pan_raw: Dict[str, Any] = {}
+        gstin_raw: Dict[str, Any] = {}
+        msme_raw: Dict[str, Any] = {}
+        bank_raw: Dict[str, Any] = {}
+
+        # Re-validate using EXISTING request_ids only (no new tasks here).
+
+        # PAN
+        pan_rid = data.get("pan_request_id")
+        if pan_rid:
+            status, raw = resolve_task_with_raw(pan_rid, "PAN")
+            pan_raw = raw
+            if status != "pending":
+                data["pan_status"] = status
+                changed = True
+
+        # GSTIN
+        gstin_rid = data.get("gstin_request_id")
+        if gstin_rid:
+            status, raw = resolve_task_with_raw(gstin_rid, "GSTIN")
+            gstin_raw = raw
+            if status != "pending":
+                data["gstin_status"] = status
+                changed = True
+
+        # MSME
+        msme_rid = data.get("msme_request_id")
+        if msme_rid:
+            status, raw = resolve_task_with_raw(msme_rid, "MSME")
+            msme_raw = raw
+            if status != "pending":
+                data["msme_status"] = status
+                changed = True
+
+        # Bank account + IFSC
+        bank_rid = data.get("bank_request_id")
+        if bank_rid:
+            status, raw = resolve_task_with_raw(bank_rid, "Bank")
+            bank_raw = raw
+            if status != "pending":
+                data["bank_account_status"] = status
+                data["ifsc_status"] = status
+                changed = True
+
+        if changed:
+            row.data = data
+            flag_modified(row, "data")
+            session.commit()
+
+        return {
+            "pan_status": data.get("pan_status"),
+            "gstin_status": data.get("gstin_status"),
+            "msme_status": data.get("msme_status"),
+            "bank_account_status": data.get("bank_account_status"),
+            "ifsc_status": data.get("ifsc_status"),
+            "idfy": {
+                "pan": pan_raw,
+                "gstin": gstin_raw,
+                "msme": msme_raw,
+                "bank": bank_raw,
+            },
+        }
     finally:
         session.close()
 
@@ -460,11 +578,17 @@ def _update_ai_invoice_status(
                 or data.get("from")
                 or data.get("seller")
             )
-            invoice_number = (
+            raw_invoice_number = (
                 data.get("invoice_number")
                 or data.get("po_number")
                 or data.get("order_number")
             )
+            invoice_number: Optional[str]
+            if raw_invoice_number is None or raw_invoice_number == "":
+                invoice_number = None
+            else:
+                # Always store invoice_number as string to match the DB column type
+                invoice_number = str(raw_invoice_number)
 
             # Attempt to parse an invoice date from common fields.
             raw_date = (

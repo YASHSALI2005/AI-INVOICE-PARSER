@@ -1,16 +1,25 @@
+"""
+IDfy verification client.
+
+Two-phase flow:
+  1. create_*_task()  — fire-and-forget during extraction; returns a request_id.
+  2. resolve_task()   — called later (e.g. on page load) to fetch the result.
+"""
+
 import time
 import uuid
-from typing import Literal
+from typing import Literal, Optional, Tuple
 
 import requests
 
 from config import get_settings
 
-VerificationStatus = Literal["valid", "invalid", "unknown", "error"]
+VerificationStatus = Literal["valid", "invalid", "unknown", "error", "pending"]
 
-POLL_INTERVAL = 3      # seconds between polls
-POLL_MAX_ATTEMPTS = 5  # try up to 5 times (≈15s max wait)
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _can_call_idfy() -> bool:
     s = get_settings()
@@ -26,326 +35,229 @@ def _headers() -> dict:
     }
 
 
-def _poll_task_result(request_id: str) -> dict:
+def _post_task(url: str, payload: dict, label: str) -> Optional[str]:
+    """POST to create an async IDfy task. Returns the request_id or None."""
+    print(f"[IDfy] Creating {label} task...")
+    try:
+        resp = requests.post(url, json=payload, headers=_headers(), timeout=30)
+    except Exception as e:
+        print(f"[IDfy] {label} task creation failed: {e}")
+        return None
+
+    print(f"[IDfy] {label} response: status={resp.status_code} body={resp.text[:500]}")
+
+    if not (200 <= resp.status_code < 300):
+        return None
+
+    try:
+        body = resp.json() or {}
+    except Exception:
+        return None
+
+    request_id = body.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        print(f"[IDfy] {label} got request_id={request_id}")
+        return request_id
+
+    print(f"[IDfy] {label} no request_id in response: {body}")
+    return None
+
+
+def _interpret_task(task: dict, label: str) -> VerificationStatus:
+    """Given a polled IDfy task dict, decide the verification status."""
+    task_status = str(task.get("status", "") or "").lower()
+
+    if task_status in ("failed", "error", "errored", "cancelled"):
+        print(f"[IDfy] {label} task failed (status={task_status})")
+        return "invalid"
+
+    result = task.get("result") or {}
+    print(f"[IDfy] {label} raw result keys: {list(result.keys())}")
+
+    # Bank-specific: account_exists is the most explicit signal.
+    acct_exists = str(result.get("account_exists", "")).strip().upper()
+    if acct_exists:
+        print(f"[IDfy] {label} account_exists = '{acct_exists}'")
+        if acct_exists == "YES":
+            return "valid"
+        if acct_exists == "NO":
+            return "invalid"
+
+    # Check nested source_output / extraction_output first.
+    for key in ("source_output", "extraction_output"):
+        section = result.get(key) or {}
+        raw = section.get("status")
+        if raw is not None:
+            s = str(raw).strip().lower()
+            print(f"[IDfy] {label} {key}.status = '{s}'")
+            if "id_found" in s and "not_found" not in s:
+                return "valid"
+            if "id_not_found" in s:
+                return "invalid"
+
+    # Direct result.status (bank accounts, some other task types).
+    raw = result.get("status")
+    if raw is not None:
+        s = str(raw).strip().lower()
+        print(f"[IDfy] {label} result.status = '{s}'")
+        if "id_found" in s and "not_found" not in s:
+            return "valid"
+        if "id_not_found" in s:
+            return "invalid"
+
+    # Fallback: source_output.account_status
+    source_output = result.get("source_output") or {}
+    acct = str(source_output.get("account_status", "")).strip().lower()
+    if acct:
+        print(f"[IDfy] {label} account_status = '{acct}'")
+        if acct in ("active", "verified", "valid"):
+            return "valid"
+        if acct in ("inactive", "invalid", "not_found", "closed"):
+            return "invalid"
+
+    print(f"[IDfy] {label} could not determine status: {str(result)[:300]}")
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Task creation (used during extraction)
+# ---------------------------------------------------------------------------
+
+def create_gstin_task(gstin: str) -> Optional[str]:
+    s = get_settings()
+    if not _can_call_idfy() or not s.idfy_gstin_url or not gstin:
+        return None
+    payload = {
+        "task_id": str(uuid.uuid4()),
+        "group_id": str(uuid.uuid4()),
+        "data": {"gstin": gstin, "filing_details": True, "e_invoice_details": True},
+    }
+    return _post_task(s.idfy_gstin_url, payload, f"GSTIN({gstin})")
+
+
+def create_msme_task(msme_number: str) -> Optional[str]:
+    s = get_settings()
+    if not _can_call_idfy() or not s.idfy_msme_url or not msme_number:
+        return None
+    payload = {
+        "task_id": str(uuid.uuid4()),
+        "group_id": str(uuid.uuid4()),
+        "data": {"udyam_number": msme_number},
+    }
+    return _post_task(s.idfy_msme_url, payload, f"MSME({msme_number})")
+
+
+def create_bank_task(account_number: str, ifsc: str) -> Optional[str]:
+    s = get_settings()
+    if not _can_call_idfy() or not s.idfy_bank_ifsc_url or not account_number or not ifsc:
+        return None
+    payload = {
+        "task_id": str(uuid.uuid4()),
+        "group_id": str(uuid.uuid4()),
+        "data": {
+            # Match IDfy validate_bank_account API field names
+            "bank_account_no": account_number,
+            "bank_ifsc_code": ifsc,
+            "nf_verification": True,
+        },
+    }
+    return _post_task(s.idfy_bank_ifsc_url, payload, f"Bank({account_number}/{ifsc})")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Resolve a single request_id (used on page load)
+# ---------------------------------------------------------------------------
+
+RESOLVE_POLL_INTERVAL = 3   # seconds between polls
+RESOLVE_MAX_ATTEMPTS = 4    # bank tasks take ~4s, so give up to ~12s
+
+
+def resolve_task_with_raw(request_id: str, label: str = "") -> Tuple[VerificationStatus, dict]:
     """
-    Poll the IDfy tasks endpoint until the task completes or we exhaust retries.
-    Returns the first task dict from the response, or empty dict on failure.
+    Fetch the task dict for a previously created IDfy task and interpret it.
+    Returns (status, raw_task_dict).
     """
     s = get_settings()
-    for attempt in range(POLL_MAX_ATTEMPTS):
-        time.sleep(POLL_INTERVAL)
+    if not request_id or not s.idfy_tasks_url:
+        return "unknown", {}
+
+    for attempt in range(RESOLVE_MAX_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(RESOLVE_POLL_INTERVAL)
+
         try:
             resp = requests.get(
                 f"{s.idfy_tasks_url}?request_id={request_id}",
                 headers=_headers(),
                 timeout=30,
             )
+            print(f"[IDfy] Response for {label} attempt {attempt + 1}: {resp.text}")
         except Exception as e:
-            print(f"[IDfy] Poll attempt {attempt + 1} network error: {e}")
+            print(f"[IDfy] Resolve {label} attempt {attempt + 1} network error: {e}")
             continue
 
         if not (200 <= resp.status_code < 300):
-            print(f"[IDfy] Poll attempt {attempt + 1} status={resp.status_code} body={resp.text[:300]}")
+            print(f"[IDfy] Resolve {label} attempt {attempt + 1} status={resp.status_code}")
             continue
 
         try:
             body = resp.json()
         except Exception:
-            print(f"[IDfy] Poll attempt {attempt + 1} JSON parse error")
             continue
 
         if not isinstance(body, list) or not body:
-            print(f"[IDfy] Poll attempt {attempt + 1} empty or non-list body: {str(body)[:300]}")
             continue
 
         first = body[0] or {}
-        task_status = first.get("status", "")
+        task_status = str(first.get("status", "") or "").lower()
 
-        if task_status == "completed":
-            return first
+        if task_status in ("completed", "failed", "error", "errored", "cancelled"):
+            status = _interpret_task(first, label or request_id)
+            return status, first
 
-        print(f"[IDfy] Poll attempt {attempt + 1} task not ready yet (status={task_status})")
+        print(f"[IDfy] Resolve {label} attempt {attempt + 1} still {task_status}")
 
-    print(f"[IDfy] Gave up polling after {POLL_MAX_ATTEMPTS} attempts for request_id={request_id}")
-    return {}
-
-
-def _extract_source_status(task: dict) -> str:
-    """Extract the source_output.status string from a completed task dict."""
-    result = task.get("result") or {}
-    source_output = result.get("source_output") or {}
-    raw = source_output.get("status")
-    if raw is not None:
-        return str(raw).strip().lower()
-
-    extraction_output = result.get("extraction_output") or {}
-    raw = extraction_output.get("status")
-    if raw is not None:
-        return str(raw).strip().lower()
-
-    raw = result.get("status")
-    if raw is not None:
-        return str(raw).strip().lower()
-
-    return ""
+    return "pending", {}
 
 
-def verify_pan(pan: str, full_name: str, dob: str) -> VerificationStatus:
+def resolve_task(request_id: str, label: str = "") -> VerificationStatus:
     """
-    Validate PAN via IDfy async task API.
-
-    Args:
-        pan: PAN number (e.g. ABCDE1234F)
-        full_name: Name as printed on PAN card
-        dob: Date of birth in YYYY-MM-DD format
+    Backwards-compatible wrapper that only returns the interpreted status.
     """
+    status, _ = resolve_task_with_raw(request_id, label)
+    return status
+
+
+# ---------------------------------------------------------------------------
+# PAN helpers — verify via button (needs name + DOB)
+# ---------------------------------------------------------------------------
+
+def create_pan_task(pan: str, full_name: str, dob: str) -> Optional[str]:
+    """Create a PAN verification task and return request_id."""
     s = get_settings()
     if not _can_call_idfy() or not s.idfy_pan_url or not s.idfy_tasks_url or not pan:
-        print(f"[IDfy] PAN check skipped: can_call={_can_call_idfy()} pan_url={bool(s.idfy_pan_url)} tasks_url={bool(s.idfy_tasks_url)} pan={bool(pan)}")
-        return "unknown"
+        return None
 
-    task_id = str(uuid.uuid4())
-    group_id = str(uuid.uuid4())
     payload = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "data": {
-            "id_number": pan,
-            "full_name": full_name,
-            "dob": dob,
-        },
+        "task_id": str(uuid.uuid4()),
+        "group_id": str(uuid.uuid4()),
+        "data": {"id_number": pan, "full_name": full_name, "dob": dob},
     }
-
-    print(f"[IDfy] Creating PAN task for {pan}...")
-    try:
-        resp = requests.post(s.idfy_pan_url, json=payload, headers=_headers(), timeout=30)
-    except Exception as e:
-        print(f"[IDfy] PAN task creation failed: {e}")
-        return "error"
-
-    print(f"[IDfy] PAN task response: status={resp.status_code} body={resp.text[:500]}")
-
-    if not (200 <= resp.status_code < 300):
-        if 400 <= resp.status_code < 500:
-            return "invalid"
-        return "error"
-
-    try:
-        body = resp.json() or {}
-    except Exception:
-        print("[IDfy] Could not parse PAN task creation JSON")
-        return "error"
-
-    request_id = body.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        print(f"[IDfy] No request_id in PAN response: {body}")
-        return "error"
-
-    print(f"[IDfy] PAN got request_id={request_id}, polling for result...")
-
-    task = _poll_task_result(request_id)
-    if not task:
-        return "error"
-
-    print(f"[IDfy] PAN raw result: {str(task.get('result', {}))[:500]}")
-    status_str = _extract_source_status(task)
-    print(f"[IDfy] PAN source_output.status = '{status_str}'")
-
-    if "id_found" in status_str and "not_found" not in status_str:
-        return "valid"
-    if "id_not_found" in status_str:
-        return "invalid"
-    return "unknown"
+    return _post_task(s.idfy_pan_url, payload, f"PAN({pan})")
 
 
-def verify_gstin(gstin: str) -> VerificationStatus:
+def verify_pan(pan: str, full_name: str, dob: str) -> Tuple[VerificationStatus, Optional[str]]:
     """
-    Validate GSTIN via IDfy async task API.
-
-    Step 1: POST to create an async verification task.
-    Step 2: Poll GET until the task completes.
-    Step 3: Read source_output.status → 'id_found' or 'id_not_found'.
+    Validate PAN via IDfy (requires full name + date of birth).
+    Returns (status, request_id) so callers can persist the request_id.
     """
-    s = get_settings()
-    if not _can_call_idfy() or not s.idfy_gstin_url or not s.idfy_tasks_url or not gstin:
-        print(f"[IDfy] GSTIN check skipped: can_call={_can_call_idfy()} gstin_url={bool(s.idfy_gstin_url)} tasks_url={bool(s.idfy_tasks_url)} gstin={bool(gstin)}")
-        return "unknown"
+    request_id = create_pan_task(pan, full_name, dob)
+    if not request_id:
+        return "error", None
 
-    task_id = str(uuid.uuid4())
-    group_id = str(uuid.uuid4())
-    payload = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "data": {
-            "gstin": gstin,
-            "filing_details": True,
-            "e_invoice_details": True,
-        },
-    }
-
-    print(f"[IDfy] Creating GSTIN task for {gstin}...")
-    try:
-        resp = requests.post(s.idfy_gstin_url, json=payload, headers=_headers(), timeout=30)
-    except Exception as e:
-        print(f"[IDfy] GSTIN task creation failed: {e}")
-        return "error"
-
-    print(f"[IDfy] Task creation response: status={resp.status_code} body={resp.text[:500]}")
-
-    if not (200 <= resp.status_code < 300):
-        if 400 <= resp.status_code < 500:
-            return "invalid"
-        return "error"
-
-    try:
-        body = resp.json() or {}
-    except Exception:
-        print("[IDfy] Could not parse task creation JSON")
-        return "error"
-
-    request_id = body.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        print(f"[IDfy] No request_id in response: {body}")
-        return "error"
-
-    print(f"[IDfy] Got request_id={request_id}, polling for result...")
-
-    task = _poll_task_result(request_id)
-    if not task:
-        return "error"
-
-    status_str = _extract_source_status(task)
-    print(f"[IDfy] GSTIN source_output.status = '{status_str}'")
-
-    if "id_found" in status_str and "not_found" not in status_str:
-        return "valid"
-    if "id_not_found" in status_str:
-        return "invalid"
-    return "unknown"
-
-
-def verify_msme(msme_number: str) -> VerificationStatus:
-    """Validate MSME / Udyam Aadhaar registration number via IDfy async task API."""
-    s = get_settings()
-    if not _can_call_idfy() or not s.idfy_msme_url or not s.idfy_tasks_url or not msme_number:
-        print(f"[IDfy] MSME check skipped: can_call={_can_call_idfy()} msme_url={bool(s.idfy_msme_url)} tasks_url={bool(s.idfy_tasks_url)} msme={bool(msme_number)}")
-        return "unknown"
-
-    task_id = str(uuid.uuid4())
-    group_id = str(uuid.uuid4())
-    payload = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "data": {"udyam_number": msme_number},
-    }
-
-    print(f"[IDfy] Creating MSME/Udyam task for {msme_number}...")
-    try:
-        resp = requests.post(s.idfy_msme_url, json=payload, headers=_headers(), timeout=30)
-    except Exception as e:
-        print(f"[IDfy] MSME task creation failed: {e}")
-        return "error"
-
-    print(f"[IDfy] MSME task response: status={resp.status_code} body={resp.text[:500]}")
-
-    if not (200 <= resp.status_code < 300):
-        if 400 <= resp.status_code < 500:
-            return "invalid"
-        return "error"
-
-    try:
-        body = resp.json() or {}
-    except Exception:
-        print("[IDfy] Could not parse MSME task creation JSON")
-        return "error"
-
-    request_id = body.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        print(f"[IDfy] No request_id in MSME response: {body}")
-        return "error"
-
-    print(f"[IDfy] MSME got request_id={request_id}, polling for result...")
-
-    task = _poll_task_result(request_id)
-    if not task:
-        return "error"
-
-    print(f"[IDfy] MSME raw result: {str(task.get('result', {}))[:500]}")
-    status_str = _extract_source_status(task)
-    print(f"[IDfy] MSME source_output.status = '{status_str}'")
-
-    if "id_found" in status_str and "not_found" not in status_str:
-        return "valid"
-    if "id_not_found" in status_str:
-        return "invalid"
-    return "unknown"
-
-
-def verify_bank_account(account_number: str, ifsc: str) -> VerificationStatus:
-    """Validate bank account + IFSC via IDfy async task API."""
-    s = get_settings()
-    if not _can_call_idfy() or not s.idfy_bank_ifsc_url or not s.idfy_tasks_url or not account_number or not ifsc:
-        print(f"[IDfy] Bank check skipped: can_call={_can_call_idfy()} bank_url={bool(s.idfy_bank_ifsc_url)} tasks_url={bool(s.idfy_tasks_url)} account={bool(account_number)} ifsc={bool(ifsc)}")
-        return "unknown"
-
-    task_id = str(uuid.uuid4())
-    group_id = str(uuid.uuid4())
-    payload = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "data": {"account_number": account_number, "ifsc": ifsc},
-    }
-
-    print(f"[IDfy] Creating bank account task for {account_number} / {ifsc}...")
-    try:
-        resp = requests.post(s.idfy_bank_ifsc_url, json=payload, headers=_headers(), timeout=30)
-    except Exception as e:
-        print(f"[IDfy] Bank task creation failed: {e}")
-        return "error"
-
-    print(f"[IDfy] Bank task response: status={resp.status_code} body={resp.text[:500]}")
-
-    if not (200 <= resp.status_code < 300):
-        if 400 <= resp.status_code < 500:
-            return "invalid"
-        return "error"
-
-    try:
-        body = resp.json() or {}
-    except Exception:
-        print("[IDfy] Could not parse bank task creation JSON")
-        return "error"
-
-    request_id = body.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        print(f"[IDfy] No request_id in bank response: {body}")
-        return "error"
-
-    print(f"[IDfy] Bank got request_id={request_id}, polling for result...")
-
-    task = _poll_task_result(request_id)
-    if not task:
-        return "error"
-
-    result = task.get("result") or {}
-    print(f"[IDfy] Bank raw result: {str(result)[:500]}")
-
-    status_str = _extract_source_status(task)
-    print(f"[IDfy] Bank source_output.status = '{status_str}'")
-
-    if status_str:
-        if "id_found" in status_str and "not_found" not in status_str:
-            return "valid"
-        if "id_not_found" in status_str:
-            return "invalid"
-
-    source_output = result.get("source_output") or {}
-    account_status = str(source_output.get("account_status", "")).strip().lower()
-    if account_status:
-        print(f"[IDfy] Bank account_status = '{account_status}'")
-        if account_status in ("active", "verified", "valid"):
-            return "valid"
-        if account_status in ("inactive", "invalid", "not_found", "closed"):
-            return "invalid"
-
-    return "unknown"
+    # PAN is on-demand so we wait a bit longer before giving up.
+    status, _ = resolve_task_with_raw(request_id, f"PAN({pan})")
+    if status == "pending":
+        # If still pending after our quick check, let the caller re-resolve later.
+        status = "pending"
+    return status, request_id
