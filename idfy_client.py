@@ -142,7 +142,10 @@ def create_msme_task(msme_number: str) -> Optional[str]:
     payload = {
         "task_id": str(uuid.uuid4()),
         "group_id": str(uuid.uuid4()),
-        "data": {"udyam_number": msme_number},
+        "data": {
+            # Match IDfy Udyam verification API: expects "uam_number"
+            "uam_number": msme_number,
+        },
     }
     return _post_task(s.idfy_msme_url, payload, f"MSME({msme_number})")
 

@@ -79,7 +79,8 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
 }'''
         rules = """- One row in the main table = one line_item.
 - IMPORTANT: Extract 'tax_amount' ONLY if it is literally printed on that specific line. Do NOT calculate it yourself.
-- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document.
+- For MSME registration, normalise to the official UDYAM format, e.g. \"UDYAM-MH-33-0006866\" (uppercase, with hyphens)."""
     elif document_type == "Sales Order bill":
         schema = '''{
   "seller": "string or null",
@@ -97,7 +98,8 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
 }'''
         rules = """- One row in the main table = one order_item.
 - IMPORTANT: Extract 'tax_amount' from the summary section matching the document total tax. Do NOT calculate it yourself.
-- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document.
+- For MSME registration, normalise to the official UDYAM format, e.g. \"UDYAM-MH-33-0006866\" (uppercase, with hyphens)."""
     else: # Sales Invoice bill
         schema = '''{
   "from": "string or null",
@@ -114,7 +116,8 @@ def _get_prompt_for_type(document_type: str, provider: str) -> str:
   "charges": [ { "description": "string or null", "quantity_hours": 0.0, "rate": 0.0, "amount": 0.0 } ]
 }'''
         rules = """- One row in the main billable services table = one charge item.
-- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document."""
+- Also extract PAN, GSTIN, MSME registration number, bank account number and IFSC code if printed on the document.
+- For MSME registration, normalise to the official UDYAM format, e.g. \"UDYAM-MH-33-0006866\" (uppercase, with hyphens)."""
 
     if provider in ["Claude", "OpenAI"]:
         return f"Extract {document_type} data into a SINGLE JSON object with EXACTLY this schema:\n{schema}\n\nRules:\n- Do NOT guess values. If unreadable or missing, use null.\n- Copy numbers exactly as shown.\n{rules}\n- Respond with ONLY valid JSON. No markdown. No explanation."
